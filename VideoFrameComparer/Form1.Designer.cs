@@ -29,7 +29,6 @@ partial class Form1
     private void InitializeComponent()
     {
         topBarPanel = new Panel();
-        activeVideoLabel = new Label();
         helpLabel = new Label();
         speedComboBox = new ComboBox();
         speedLabel = new Label();
@@ -81,10 +80,7 @@ partial class Form1
         // topBarPanel
         // 
         topBarPanel.BackColor = Color.FromArgb(32, 32, 32);
-        topBarPanel.Controls.Add(activeVideoLabel);
         topBarPanel.Controls.Add(helpLabel);
-        topBarPanel.Controls.Add(speedComboBox);
-        topBarPanel.Controls.Add(speedLabel);
         topBarPanel.Controls.Add(layoutComboBox);
         topBarPanel.Controls.Add(layoutLabel);
         topBarPanel.Dock = DockStyle.Top;
@@ -93,47 +89,17 @@ partial class Form1
         topBarPanel.Size = new Size(1424, 64);
         topBarPanel.TabIndex = 0;
         // 
-        // activeVideoLabel
-        // 
-        activeVideoLabel.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        activeVideoLabel.ForeColor = Color.White;
-        activeVideoLabel.Location = new Point(1138, 10);
-        activeVideoLabel.Name = "activeVideoLabel";
-        activeVideoLabel.Size = new Size(270, 20);
-        activeVideoLabel.TabIndex = 7;
-        activeVideoLabel.Text = "Active: Video A";
-        activeVideoLabel.TextAlign = ContentAlignment.MiddleRight;
-        // 
         // helpLabel
         // 
-        helpLabel.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        helpLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         helpLabel.ForeColor = Color.Gainsboro;
-        helpLabel.Location = new Point(871, 34);
+          helpLabel.Location = new Point(180, 12);
         helpLabel.Name = "helpLabel";
-        helpLabel.Size = new Size(537, 20);
+          helpLabel.Size = new Size(1228, 40);
         helpLabel.TabIndex = 6;
-        helpLabel.Text = "Bottom timeline scrubs both videos. Click a video to control arrow-key stepping.";
+          helpLabel.AutoEllipsis = true;
+          helpLabel.Text = "Click video to set active | Arrow-keys to move frame-by-frame | Shift + arrow-keys for 20 frames | Ctrl + Arrow-keys controls shared timeline | Space plays/pauses | M adds a marker | Select marker + DEL to delete";
         helpLabel.TextAlign = ContentAlignment.MiddleRight;
-        // 
-        // speedComboBox
-        // 
-        speedComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
-        speedComboBox.FormattingEnabled = true;
-        speedComboBox.Items.AddRange(new object[] { "0.25x", "0.5x", "1x" });
-        speedComboBox.Location = new Point(648, 21);
-        speedComboBox.Name = "speedComboBox";
-        speedComboBox.Size = new Size(92, 23);
-        speedComboBox.TabIndex = 5;
-        speedComboBox.SelectedIndexChanged += speedComboBox_SelectedIndexChanged;
-        // 
-        // speedLabel
-        // 
-        speedLabel.ForeColor = Color.White;
-        speedLabel.Location = new Point(605, 23);
-        speedLabel.Name = "speedLabel";
-        speedLabel.Size = new Size(40, 20);
-        speedLabel.TabIndex = 4;
-        speedLabel.Text = "Speed";
         // 
         // layoutComboBox
         // 
@@ -185,11 +151,15 @@ partial class Form1
         // 
         // transportLayout
         // 
-        transportLayout.ColumnCount = 2;
+        transportLayout.ColumnCount = 4;
         transportLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 132F));
         transportLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        transportLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 52F));
+        transportLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90F));
         transportLayout.Controls.Add(playPauseButton, 0, 0);
         transportLayout.Controls.Add(playbackStatusLabel, 1, 0);
+        transportLayout.Controls.Add(speedLabel, 2, 0);
+        transportLayout.Controls.Add(speedComboBox, 3, 0);
         transportLayout.Controls.Add(masterTimeline, 1, 1);
         transportLayout.Dock = DockStyle.Fill;
         transportLayout.Location = new Point(16, 8);
@@ -213,6 +183,30 @@ partial class Form1
         playbackStatusLabel.Text = "Master timeline";
         playbackStatusLabel.TextAlign = ContentAlignment.MiddleLeft;
         // 
+        // speedLabel
+        // 
+        speedLabel.Dock = DockStyle.Fill;
+        speedLabel.ForeColor = Color.White;
+        speedLabel.Location = new Point(1263, 0);
+        speedLabel.Name = "speedLabel";
+        speedLabel.Size = new Size(52, 22);
+        speedLabel.TabIndex = 3;
+        speedLabel.Text = "Speed";
+        speedLabel.TextAlign = ContentAlignment.MiddleRight;
+        // 
+        // speedComboBox
+        // 
+        speedComboBox.Dock = DockStyle.Fill;
+        speedComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+        speedComboBox.FormattingEnabled = true;
+        speedComboBox.Items.AddRange(new object[] { "0.25x", "0.5x", "1x" });
+        speedComboBox.Location = new Point(1321, 0);
+        speedComboBox.Margin = new Padding(6, 0, 0, 0);
+        speedComboBox.Name = "speedComboBox";
+        speedComboBox.Size = new Size(71, 23);
+        speedComboBox.TabIndex = 4;
+        speedComboBox.SelectedIndexChanged += speedComboBox_SelectedIndexChanged;
+        // 
         // masterTimeline
         // 
         masterTimeline.Dock = DockStyle.Fill;
@@ -220,7 +214,7 @@ partial class Form1
         masterTimeline.Location = new Point(135, 25);
         masterTimeline.Margin = new Padding(3, 3, 0, 0);
         masterTimeline.Name = "masterTimeline";
-        masterTimeline.Size = new Size(1257, 28);
+        masterTimeline.Size = new Size(1177, 28);
         masterTimeline.TabIndex = 1;
         masterTimeline.TickStyle = TickStyle.None;
         masterTimeline.Scroll += masterTimeline_Scroll;
@@ -497,7 +491,6 @@ partial class Form1
     #endregion
 
     private Panel topBarPanel;
-    private Label activeVideoLabel;
     private Label helpLabel;
     private ComboBox speedComboBox;
     private Label speedLabel;

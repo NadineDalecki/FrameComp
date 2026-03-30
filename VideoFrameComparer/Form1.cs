@@ -24,6 +24,8 @@ public partial class Form1 : Form
     private const int PreviewTimelineHeight = 52;
     private const int BetweenPreviewGap = 1;
     private static readonly string[] SupportedExtensions = [".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v"];
+    private const string VideoFileDialogFilter =
+        "Video Files (*.mp4;*.mov;*.avi;*.mkv;*.wmv;*.m4v)|*.mp4;*.mov;*.avi;*.mkv;*.wmv;*.m4v|All Files (*.*)|*.*";
 
     private readonly LibVLC _libVlc;
     private readonly string _projectFilePath;
@@ -182,6 +184,7 @@ public partial class Form1 : Form
         }
         catch (Exception ex)
         {
+            AppLog.WriteError($"Could not load dropped video into {track.Name}.", ex);
             string details = ex.InnerException is null ? ex.Message : $"{ex.Message}\n\n{ex.InnerException.Message}";
             MessageBox.Show(this, details, "Could not load dropped video", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
@@ -204,7 +207,6 @@ public partial class Form1 : Form
         _activeTrack = track;
         SelectTrackPanel(_leftTrack, track == _leftTrack);
         SelectTrackPanel(_rightTrack, track == _rightTrack);
-        activeVideoLabel.Text = $"Active: {track.Name}";
         track.MarkerPanel.Invalidate();
         (_activeTrack == _leftTrack ? _rightTrack : _leftTrack).MarkerPanel.Invalidate();
         UpdatePlaybackStatus();
@@ -238,7 +240,7 @@ public partial class Form1 : Form
         using Mat? frame = track.ReadFrame(safeFrameIndex);
         if (frame is null || frame.Empty())
         {
-            AppLog.Write($"RenderTrack failed for {track.Name} at frame {safeFrameIndex}.");
+            AppLog.WriteError($"RenderTrack failed for {track.Name} at frame {safeFrameIndex}.");
             return;
         }
 
@@ -670,7 +672,7 @@ public partial class Form1 : Form
         track.ShowPlayback();
         if (!track.PlayFromCurrentFrame())
         {
-            AppLog.Write($"Playback failed to start for {track.Name}.");
+            AppLog.WriteError($"Playback failed to start for {track.Name}.");
             track.ShowStillFrame();
             return;
         }
@@ -966,15 +968,17 @@ public partial class Form1 : Form
             layoutComboBox.SelectedIndex = session.LayoutIndex is >= 0 and <= 1 ? session.LayoutIndex.Value : 0;
             speedComboBox.SelectedIndex = session.SpeedIndex is >= 0 and <= 2 ? session.SpeedIndex.Value : 2;
 
-            if (!string.IsNullOrWhiteSpace(session.LeftVideoPath) && File.Exists(session.LeftVideoPath))
+            string? leftVideoPath = ResolveVideoPath(session.LeftVideoPath, _leftTrack.Name);
+            if (!string.IsNullOrWhiteSpace(leftVideoPath))
             {
-                LoadVideoIntoTrack(_leftTrack, session.LeftVideoPath);
+                LoadVideoIntoTrack(_leftTrack, leftVideoPath);
                 ApplyMarkers(_leftTrack, session.LeftMarkers);
             }
 
-            if (!string.IsNullOrWhiteSpace(session.RightVideoPath) && File.Exists(session.RightVideoPath))
+            string? rightVideoPath = ResolveVideoPath(session.RightVideoPath, _rightTrack.Name);
+            if (!string.IsNullOrWhiteSpace(rightVideoPath))
             {
-                LoadVideoIntoTrack(_rightTrack, session.RightVideoPath);
+                LoadVideoIntoTrack(_rightTrack, rightVideoPath);
                 ApplyMarkers(_rightTrack, session.RightMarkers);
             }
 
@@ -989,11 +993,54 @@ public partial class Form1 : Form
         }
         catch
         {
+            AppLog.WriteError($"Failed to restore session from {_projectFilePath}.");
         }
         finally
         {
             _isRestoringSession = false;
         }
+    }
+
+    private string? ResolveVideoPath(string? savedPath, string trackName)
+    {
+        if (string.IsNullOrWhiteSpace(savedPath))
+        {
+            return null;
+        }
+
+        if (File.Exists(savedPath))
+        {
+            return savedPath;
+        }
+
+        DialogResult relinkPrompt = MessageBox.Show(
+            this,
+            $"{trackName} could not find the saved video file:\n\n{savedPath}\n\nDo you want to locate the file manually?",
+            "Video File Missing",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning);
+
+        if (relinkPrompt != DialogResult.Yes)
+        {
+            return null;
+        }
+
+        using var openDialog = new OpenFileDialog
+        {
+            Title = $"Locate {trackName}",
+            Filter = VideoFileDialogFilter,
+            CheckFileExists = true,
+            Multiselect = false,
+            FileName = Path.GetFileName(savedPath)
+        };
+
+        string? savedDirectory = Path.GetDirectoryName(savedPath);
+        if (!string.IsNullOrWhiteSpace(savedDirectory) && Directory.Exists(savedDirectory))
+        {
+            openDialog.InitialDirectory = savedDirectory;
+        }
+
+        return openDialog.ShowDialog(this) == DialogResult.OK ? openDialog.FileName : null;
     }
 
     private void SaveSession()
@@ -1024,6 +1071,7 @@ public partial class Form1 : Form
         }
         catch
         {
+            AppLog.WriteError($"Failed to save session to {_projectFilePath}.");
         }
     }
 
@@ -1196,7 +1244,7 @@ public partial class Form1 : Form
         {
             if (PlaybackPlayer is null)
             {
-                AppLog.Write($"PlayFromCurrentFrame aborted for {Name}: no playback player.");
+                AppLog.WriteError($"PlayFromCurrentFrame aborted for {Name}: no playback player.");
                 return false;
             }
 
@@ -1310,7 +1358,7 @@ public partial class Form1 : Form
             PlaybackPlayer.Paused += (_, _) => AppLog.Write($"{Name}: VLC Paused");
             PlaybackPlayer.Stopped += (_, _) => AppLog.Write($"{Name}: VLC Stopped");
             PlaybackPlayer.EndReached += (_, _) => AppLog.Write($"{Name}: VLC EndReached");
-            PlaybackPlayer.EncounteredError += (_, _) => AppLog.Write($"{Name}: VLC EncounteredError");
+            PlaybackPlayer.EncounteredError += (_, _) => AppLog.WriteError($"{Name}: VLC EncounteredError");
         }
     }
 
@@ -1332,9 +1380,15 @@ internal static class AppLog
 
     public static void Write(string message)
     {
+    }
+
+    public static void WriteError(string message, Exception? exception = null)
+    {
         try
         {
-            string line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {message}{Environment.NewLine}";
+            string line = exception is null
+                ? $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} ERROR {message}{Environment.NewLine}"
+                : $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} ERROR {message} | {exception.GetType().Name}: {exception.Message}{Environment.NewLine}";
             lock (Sync)
             {
                 File.AppendAllText(LogFilePath, line);
