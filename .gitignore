@@ -1,6 +1,7 @@
 .dotnet-home/
 .nuget/
 publish/
+release/
 Projects/
 libvlc/
 

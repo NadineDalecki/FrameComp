@@ -1,23 +1,33 @@
-# VidComp
+# FrameComp
 
 Simple Windows app for comparing two videos frame by frame.
 
-## What It Does
+## Features
 
-- Load two videos by dragging them onto the left and right panes
-- Show videos side by side or stacked
-- Click a pane to make it the active video
+- Drag one video into each pane
+- View videos side by side or stacked
+- Select the active video by clicking its pane
 - Step the active video with arrow keys
-- Hold `Shift` to step 20 frames at a time
+- Hold `Shift` to step 20 frames
 - Hold `Ctrl` with arrow keys to step both videos together
-- Use the shared bottom timeline to scrub both videos together
-- Play both videos in sync with `Space` or the `Play Both` button
-- Adjust playback speed with the speed selector
-- Zoom the active video with the mouse wheel
+- Scrub both videos with the shared bottom timeline
+- Play or pause both videos with `Space` or `Play Both`
+- Change playback speed
+- Zoom a video with the mouse wheel
 - Add markers with `M`
-- Select markers in the marker row and remove them with `Delete`
-- Save project state, including loaded videos and markers
-- Reopen existing projects from the startup project picker
+- Select markers in the marker row and delete them with `Delete`
+- Save comparison projects and reopen them from the startup picker
+
+## Download And Run
+
+The easiest way for normal users is a GitHub Release zip.
+
+1. Go to the repository releases page.
+2. Download the latest Windows zip.
+3. Extract the zip to any folder.
+4. Run `VideoFrameComparer.exe`.
+
+No separate .NET install should be needed for the published `win-x64` build.
 
 ## Controls
 
@@ -30,13 +40,9 @@ Simple Windows app for comparing two videos frame by frame.
 - `Delete`: remove the selected marker on the active video
 - `Mouse wheel`: zoom the hovered video pane
 
-## Project Layout
+## Project Files
 
-- Main app source: [VideoFrameComparer](D:\Programming\VidComp\VideoFrameComparer)
-- Startup project files: [Projects](D:\Programming\VidComp\Projects)
-- Publish script: [publish.ps1](D:\Programming\VidComp\publish.ps1)
-
-Project files are stored as JSON in `D:\Programming\VidComp\Projects`.
+Comparison projects are stored as JSON files in the local `Projects` folder beside the app.
 
 ## Run From Source
 
@@ -47,11 +53,23 @@ $env:NUGET_PACKAGES='D:\Programming\VidComp\.nuget\packages'
 dotnet run --project .\VideoFrameComparer\VideoFrameComparer.csproj
 ```
 
-## Publish EXE
+## Publish Locally
 
 ```powershell
 cd D:\Programming\VidComp
 .\publish.ps1
 ```
 
-The published app is copied to the root `D:\Programming\VidComp` folder and also kept in `D:\Programming\VidComp\publish\win-x64`.
+That creates the runnable app in:
+
+- `D:\Programming\VidComp\publish\win-x64`
+- and copies the same runtime files to `D:\Programming\VidComp`
+
+## Create A Release Zip
+
+```powershell
+cd D:\Programming\VidComp
+.\package-release.ps1
+```
+
+That creates a release archive in `D:\Programming\VidComp\release`.
