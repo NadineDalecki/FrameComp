@@ -7,11 +7,14 @@ Simple Windows app for comparing two videos frame by frame.
 - Drag one video into each pane
 - View videos side by side or stacked
 - Select the active video by clicking its pane
+- Temporarily switch a slot to a live app window source with `Use App Window`
+- Return a live window slot back to its video with `Back To Video`
 - Step the active video with arrow keys
 - Hold `Shift` to step 20 frames
 - Hold `Ctrl` with arrow keys to step both videos together
 - Scrub both videos with the shared bottom timeline
 - Play or pause both videos with `Space` or `Play Both`
+- Toggle play/pause globally with `Page Down` (works while app is in background)
 - Change playback speed
 - Zoom a video with the mouse wheel
 - Add markers with `M`
@@ -36,9 +39,16 @@ No separate .NET install should be needed for the published `win-x64` build.
 - `Ctrl + Arrow`: move both videos by 1 frame
 - `Ctrl + Shift + Arrow`: move both videos by 20 frames
 - `Space`: play or pause both videos
+- `Page Down`: global play/pause toggle (background hotkey)
 - `M`: add a marker on the active video
 - `Delete`: remove the selected marker on the active video
 - `Mouse wheel`: zoom the hovered video pane
+
+## Live Window Source Notes
+
+- Live window source mode is temporary and is not saved into the project JSON.
+- Project video paths and markers are preserved while using live window mode.
+- Timeline stepping, marker editing, and playback controls apply to video sources; live window slots are shown as a comparison view.
 
 ## Project Files
 
