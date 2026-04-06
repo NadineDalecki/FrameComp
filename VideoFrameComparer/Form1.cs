@@ -2503,6 +2503,8 @@ public partial class Form1 : Form
         DrawingSize sourceFrameSize = track.DisplayFrameSize;
         if (sourceFrameSize.Width <= 0 || sourceFrameSize.Height <= 0)
         {
+            track.ImagePanel.AutoScrollMinSize = DrawingSize.Empty;
+            track.ImagePanel.AutoScrollPosition = new DrawingPoint(0, 0);
             track.PictureBox.Size = new DrawingSize(320, 180);
             track.PictureBox.Location = new DrawingPoint(12, 12);
             return;
@@ -2524,21 +2526,23 @@ public partial class Form1 : Form
 
     private static void UpdateTrackScrollState(VideoTrack track, int viewportWidth, int viewportHeight)
     {
+        const int ScrollTolerancePixels = 2;
+        bool allowScrollFromZoom = track.ZoomMultiplier > (MinZoomMultiplier + 0.001f);
         int picW = track.PictureBox.Width;
         int picH = track.PictureBox.Height;
-        bool needsH = picW > viewportWidth;
-        bool needsV = picH > viewportHeight;
+        bool needsH = allowScrollFromZoom && (picW > (viewportWidth + ScrollTolerancePixels));
+        bool needsV = allowScrollFromZoom && (picH > (viewportHeight + ScrollTolerancePixels));
 
         // Account for scrollbar cross-impact so we don't oscillate into phantom bars.
         if (needsV && !needsH)
         {
             int reducedWidth = Math.Max(1, viewportWidth - SystemInformation.VerticalScrollBarWidth);
-            needsH = picW > reducedWidth;
+            needsH = picW > (reducedWidth + ScrollTolerancePixels);
         }
         if (needsH && !needsV)
         {
             int reducedHeight = Math.Max(1, viewportHeight - SystemInformation.HorizontalScrollBarHeight);
-            needsV = picH > reducedHeight;
+            needsV = picH > (reducedHeight + ScrollTolerancePixels);
         }
 
         track.ImagePanel.AutoScrollMinSize = new DrawingSize(needsH ? picW : 0, needsV ? picH : 0);
@@ -2609,32 +2613,41 @@ public partial class Form1 : Form
             return;
         }
 
-        track.ZoomMultiplier = nextZoom;
-        ApplyScale(track);
-        RestoreZoomAnchor(track, mousePoint, anchorX, anchorY);
-        UpdateTrackInfo(track);
-        AppLog.Write($"Zoom updated for {track.Name}: {track.ZoomMultiplier:0.##}x");
+        // Keep both previews on the same zoom multiplier and center both views
+        // on the same normalized anchor derived from the active mouse position.
+        foreach (VideoTrack candidate in new[] { _leftTrack, _rightTrack })
+        {
+            if (!candidate.IsLoaded || candidate.IsTemporaryWindowSource)
+            {
+                continue;
+            }
+
+            candidate.ZoomMultiplier = nextZoom;
+            ApplyScale(candidate);
+            RestoreZoomCenter(candidate, anchorX, anchorY);
+            UpdateTrackInfo(candidate);
+        }
+
+        AppLog.Write($"Zoom synced: {nextZoom:0.##}x");
     }
 
-    private static void RestoreZoomAnchor(VideoTrack track, DrawingPoint mousePoint, float anchorX, float anchorY)
+    private static void RestoreZoomCenter(VideoTrack track, float centerX, float centerY)
     {
         int viewportWidth = Math.Max(1, track.ImagePanel.ClientSize.Width - track.ImagePanel.Padding.Horizontal);
         int viewportHeight = Math.Max(1, track.ImagePanel.ClientSize.Height - track.ImagePanel.Padding.Vertical);
-
         int scrollX = 0;
         int scrollY = 0;
 
         if (track.PictureBox.Width > viewportWidth)
         {
-            double targetImageX = anchorX * track.PictureBox.Width;
-            scrollX = (int)Math.Round(targetImageX - mousePoint.X);
+            double centerPixelX = centerX * track.PictureBox.Width;
+            scrollX = (int)Math.Round(centerPixelX - (viewportWidth / 2d));
             scrollX = Math.Clamp(scrollX, 0, Math.Max(0, track.PictureBox.Width - viewportWidth));
         }
-
         if (track.PictureBox.Height > viewportHeight)
         {
-            double targetImageY = anchorY * track.PictureBox.Height;
-            scrollY = (int)Math.Round(targetImageY - mousePoint.Y);
+            double centerPixelY = centerY * track.PictureBox.Height;
+            scrollY = (int)Math.Round(centerPixelY - (viewportHeight / 2d));
             scrollY = Math.Clamp(scrollY, 0, Math.Max(0, track.PictureBox.Height - viewportHeight));
         }
 
