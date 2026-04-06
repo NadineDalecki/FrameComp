@@ -1,4 +1,5 @@
 .dotnet-home/
+.dotnet-cli/
 .nuget/
 publish/
 release/
@@ -23,3 +24,5 @@ wpfgfx_cor3.dll
 
 .vs/
 *.user
+
+QA.md
