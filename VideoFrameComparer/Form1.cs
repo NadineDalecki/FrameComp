@@ -5,6 +5,7 @@ using OpenCvSharp.Extensions;
 using System.Runtime.InteropServices;
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
+using System.Globalization;
 using DrawingPoint = System.Drawing.Point;
 using DrawingSize = System.Drawing.Size;
 using System.Text.Json;
@@ -106,6 +107,11 @@ public partial class Form1 : Form
     private Panel? _transportHostPanel;
     private Panel? _transportLeftPanel;
     private Panel? _transportRightPanel;
+    private int? _globalTrimInFrame;
+    private int? _globalTrimOutFrame;
+    private Button? _saveTrimmedVideosTopBarButton;
+    private Button? _saveCombinedVideoTopBarButton;
+    private bool _isSavingTrimmedVideos;
 
     public Form1(string projectFilePath)
     {
@@ -186,7 +192,9 @@ public partial class Form1 : Form
         LayoutTopBarButtons();
         LayoutTopBarControls();
         InitializeHelpUi();
+        InitializeTrimTopBarButtons();
         ConfigureTooltips();
+        UpdateTrimActionButtonsState();
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -198,8 +206,32 @@ public partial class Form1 : Form
         _windowSourceTimer.Dispose();
         _leftTrack.Dispose();
         _rightTrack.Dispose();
+        DisposeUiImages();
+        _uiToolTip.Dispose();
         _libVlc.Dispose();
         base.OnFormClosing(e);
+    }
+
+    private void DisposeUiImages()
+    {
+        DisposeImage(ref _layoutStackedActiveIcon);
+        DisposeImage(ref _layoutStackedInactiveIcon);
+        DisposeImage(ref _layoutSideBySideActiveIcon);
+        DisposeImage(ref _layoutSideBySideInactiveIcon);
+        DisposeImage(ref _commentsActiveIcon);
+        DisposeImage(ref _commentsInactiveIcon);
+        DisposeImage(ref _helpIcon);
+    }
+
+    private static void DisposeImage(ref Image? image)
+    {
+        if (image is null)
+        {
+            return;
+        }
+
+        image.Dispose();
+        image = null;
     }
 
     private void InitializeAlignmentOverlay()
@@ -432,11 +464,916 @@ public partial class Form1 : Form
 
     private void LayoutTopBarControls()
     {
-        alignmentModeCheckBox.Location = new DrawingPoint(
-            useWindowSourceButton.Right + 12,
-            useWindowSourceButton.Top + 3);
+        int y = useWindowSourceButton.Top;
+        int nextX = useWindowSourceButton.Right + 12;
+
+        if (alignmentModeCheckBox.Visible)
+        {
+            alignmentModeCheckBox.Location = new DrawingPoint(nextX, useWindowSourceButton.Top + 3);
+            nextX = alignmentModeCheckBox.Right + 14;
+        }
+        else
+        {
+            alignmentModeCheckBox.Location = new DrawingPoint(nextX, useWindowSourceButton.Top + 3);
+        }
+
+        if (_saveTrimmedVideosTopBarButton is not null)
+        {
+            _saveTrimmedVideosTopBarButton.Location = new DrawingPoint(nextX, y);
+            _saveTrimmedVideosTopBarButton.BringToFront();
+            nextX = _saveTrimmedVideosTopBarButton.Right + 8;
+        }
+
+        if (_saveCombinedVideoTopBarButton is not null)
+        {
+            _saveCombinedVideoTopBarButton.Location = new DrawingPoint(nextX, y);
+            _saveCombinedVideoTopBarButton.BringToFront();
+        }
+
         alignmentModeCheckBox.BringToFront();
     }
+
+    private void InitializeTrimTopBarButtons()
+    {
+        _saveTrimmedVideosTopBarButton = CreateTopBarActionButton("Save Trimmed Videos", SaveTrimmedVideosButton_Click);
+        _saveTrimmedVideosTopBarButton.Size = new DrawingSize(148, 24);
+        _saveCombinedVideoTopBarButton = CreateTopBarActionButton("Save Combined Video", SaveCombinedVideoButton_Click);
+        _saveCombinedVideoTopBarButton.Size = new DrawingSize(146, 24);
+        topBarPanel.Controls.Add(_saveTrimmedVideosTopBarButton);
+        topBarPanel.Controls.Add(_saveCombinedVideoTopBarButton);
+        LayoutTopBarControls();
+    }
+
+    private static Button CreateTopBarActionButton(string text, EventHandler onClick)
+    {
+        var button = new Button
+        {
+            Text = text,
+            Size = new DrawingSize(74, 24),
+            FlatStyle = FlatStyle.Standard,
+            UseVisualStyleBackColor = true,
+            TabStop = false
+        };
+        button.Click += onClick;
+        return button;
+    }
+
+    private void SaveTrimmedVideosButton_Click(object? sender, EventArgs e)
+    {
+        if (_isSavingTrimmedVideos || !CanExportTrimRange())
+        {
+            return;
+        }
+
+        bool hasFfmpeg = TryResolveFfmpegExecutable(out string? ffmpegExecutable);
+        if (!hasFfmpeg)
+        {
+            DialogResult installPrompt = MessageBox.Show(
+                this,
+                "FFmpeg was not found.\n\nDo you want FrameComp to try installing it automatically now?\n\nYes = install FFmpeg\nNo = continue with built-in Accurate export (slower)\nCancel = abort export",
+                "FFmpeg Not Found",
+                MessageBoxButtons.YesNoCancel,
+                MessageBoxIcon.Question);
+            if (installPrompt == DialogResult.Cancel)
+            {
+                return;
+            }
+            if (installPrompt == DialogResult.Yes)
+            {
+                if (TryInstallFfmpegForUser(out string installMessage))
+                {
+                    hasFfmpeg = TryResolveFfmpegExecutable(out ffmpegExecutable);
+                }
+
+                if (!hasFfmpeg)
+                {
+                    MessageBox.Show(this, $"{installMessage}\n\nUsing built-in Accurate export.", "FFmpeg Not Available", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+            }
+        }
+
+        using var folderDialog = new FolderBrowserDialog
+        {
+            Description = "Select output folder for trimmed videos",
+            UseDescriptionForTitle = true,
+            ShowNewFolderButton = true
+        };
+        string? projectDir = Path.GetDirectoryName(_projectFilePath);
+        if (!string.IsNullOrWhiteSpace(projectDir) && Directory.Exists(projectDir))
+        {
+            folderDialog.SelectedPath = projectDir;
+        }
+
+        if (folderDialog.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(folderDialog.SelectedPath))
+        {
+            return;
+        }
+
+        StopPlayback();
+        int restoreGlobalFrame = masterTimeline.Value;
+        int trimIn = GetGlobalTrimIn();
+        int trimOut = GetGlobalTrimOut();
+        var savedFiles = new List<string>();
+        var skippedReasons = new List<string>();
+        var plans = new List<TrimExportPlan>();
+        foreach (VideoTrack track in new[] { _leftTrack, _rightTrack })
+        {
+            if (!TryGetTrackTrimRange(track, trimIn, trimOut, out int localStart, out int localEnd, out string rangeReason))
+            {
+                skippedReasons.Add(rangeReason);
+                continue;
+            }
+
+            plans.Add(new TrimExportPlan(track, localStart, localEnd));
+        }
+
+        if (plans.Count == 0)
+        {
+            string reason = skippedReasons.Count > 0
+                ? string.Join("\n", skippedReasons)
+                : "No exportable track was found for the selected range.";
+            MessageBox.Show(this, reason, "Nothing Saved", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        using var progressForm = new TrimExportProgressForm(plans.Count);
+        progressForm.Show(this);
+        progressForm.UpdateProgress(0, 0d, $"Preparing {plans.Count} export job(s)...");
+        Application.DoEvents();
+
+        _isSavingTrimmedVideos = true;
+        UpdateTrimActionButtonsState();
+        try
+        {
+            for (int planIndex = 0; planIndex < plans.Count; planIndex++)
+            {
+                TrimExportPlan plan = plans[planIndex];
+                string modeLabel = "Accurate";
+                progressForm.UpdateProgress(planIndex, 0d, $"{modeLabel}: {plan.Track.Name}");
+                Application.DoEvents();
+
+                bool exported = false;
+                if (hasFfmpeg && ffmpegExecutable is not null)
+                {
+                    exported = TryExportTrimmedTrackWithFfmpeg(
+                        ffmpegExecutable,
+                        plan,
+                        folderDialog.SelectedPath,
+                        ratio =>
+                        {
+                            progressForm.UpdateProgress(planIndex, ratio, $"{modeLabel}: {plan.Track.Name}");
+                            Application.DoEvents();
+                        },
+                        out string? outputPath,
+                        out string message);
+                    if (exported)
+                    {
+                        if (!string.IsNullOrWhiteSpace(outputPath))
+                        {
+                            savedFiles.Add(outputPath);
+                        }
+                    }
+                    else
+                    {
+                        skippedReasons.Add(message);
+                    }
+                }
+                else
+                {
+                    exported = TryExportTrimmedTrackBuiltIn(
+                        plan,
+                        folderDialog.SelectedPath,
+                        ratio =>
+                        {
+                            progressForm.UpdateProgress(planIndex, ratio, $"{modeLabel}: {plan.Track.Name}");
+                            Application.DoEvents();
+                        },
+                        out string? outputPath,
+                        out string message);
+                    if (exported)
+                    {
+                        if (!string.IsNullOrWhiteSpace(outputPath))
+                        {
+                            savedFiles.Add(outputPath);
+                        }
+                    }
+                    else
+                    {
+                        skippedReasons.Add(message);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            _isSavingTrimmedVideos = false;
+            UpdateTrimActionButtonsState();
+            SetGlobalTimelineFrame(restoreGlobalFrame);
+            progressForm.Close();
+        }
+
+        if (savedFiles.Count > 0)
+        {
+            string success = "Saved trimmed videos:\n" + string.Join("\n", savedFiles.Select(Path.GetFileName));
+            string skipped = skippedReasons.Count > 0
+                ? $"\n\nSkipped:\n{string.Join("\n", skippedReasons)}"
+                : string.Empty;
+            MessageBox.Show(this, success + skipped, "Trim Saved", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        string failure = skippedReasons.Count > 0
+            ? string.Join("\n", skippedReasons)
+            : "No exportable track was found for the selected range.";
+        MessageBox.Show(this, failure, "Nothing Saved", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
+    private void SaveCombinedVideoButton_Click(object? sender, EventArgs e)
+    {
+        if (_isSavingTrimmedVideos || !CanExportCombinedRange())
+        {
+            return;
+        }
+
+        using var saveDialog = new SaveFileDialog
+        {
+            Title = "Save Combined Video",
+            Filter = "MP4 Video (*.mp4)|*.mp4",
+            DefaultExt = "mp4",
+            AddExtension = true,
+            OverwritePrompt = true
+        };
+        string? projectDir = Path.GetDirectoryName(_projectFilePath);
+        if (!string.IsNullOrWhiteSpace(projectDir) && Directory.Exists(projectDir))
+        {
+            saveDialog.InitialDirectory = projectDir;
+        }
+
+        string layoutName = layoutComboBox.SelectedIndex == 0 ? "side-by-side" : "stacked";
+        int trimIn = GetGlobalTrimIn();
+        int trimOut = GetGlobalTrimOut();
+        saveDialog.FileName = $"{Path.GetFileNameWithoutExtension(_projectFilePath)}_combined_{layoutName}_{trimIn + 1}-{trimOut + 1}.mp4";
+
+        if (saveDialog.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(saveDialog.FileName))
+        {
+            return;
+        }
+
+        StopPlayback();
+        int restoreGlobalFrame = masterTimeline.Value;
+        using var progressForm = new TrimExportProgressForm(1);
+        progressForm.Show(this);
+        progressForm.UpdateProgress(0, 0d, "Preparing combined export...");
+        Application.DoEvents();
+
+        _isSavingTrimmedVideos = true;
+        UpdateTrimActionButtonsState();
+        try
+        {
+            bool isSideBySide = layoutComboBox.SelectedIndex == 0;
+            if (TryExportCombinedVideoBuiltIn(
+                trimIn,
+                trimOut,
+                saveDialog.FileName,
+                isSideBySide,
+                ratio =>
+                {
+                    progressForm.UpdateProgress(0, ratio, "Saving combined video...");
+                    Application.DoEvents();
+                },
+                out string message))
+            {
+                progressForm.UpdateProgress(0, 1d, "Combined video saved.");
+                Application.DoEvents();
+                MessageBox.Show(this, $"Saved combined video:\n{Path.GetFileName(saveDialog.FileName)}", "Combined Saved", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                MessageBox.Show(this, message, "Combined Export Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+        finally
+        {
+            _isSavingTrimmedVideos = false;
+            UpdateTrimActionButtonsState();
+            SetGlobalTimelineFrame(restoreGlobalFrame);
+            progressForm.Close();
+        }
+    }
+
+    private bool TryExportCombinedVideoBuiltIn(
+        int trimInGlobal,
+        int trimOutGlobal,
+        string outputPath,
+        bool sideBySide,
+        Action<double>? onProgress,
+        out string message)
+    {
+        int leftMaxWidth = _leftTrack.IsLoaded && !_leftTrack.IsTemporaryWindowSource ? Math.Max(1, _leftTrack.FrameSize.Width) : 0;
+        int rightMaxWidth = _rightTrack.IsLoaded && !_rightTrack.IsTemporaryWindowSource ? Math.Max(1, _rightTrack.FrameSize.Width) : 0;
+        int leftMaxHeight = _leftTrack.IsLoaded && !_leftTrack.IsTemporaryWindowSource ? Math.Max(1, _leftTrack.FrameSize.Height) : 0;
+        int rightMaxHeight = _rightTrack.IsLoaded && !_rightTrack.IsTemporaryWindowSource ? Math.Max(1, _rightTrack.FrameSize.Height) : 0;
+        int maxWidth = Math.Max(leftMaxWidth, rightMaxWidth);
+        int maxHeight = Math.Max(leftMaxHeight, rightMaxHeight);
+        if (maxWidth <= 0 || maxHeight <= 0)
+        {
+            message = "No video frames are available to combine in the selected range.";
+            return false;
+        }
+
+        const int gap = 1;
+        int outputWidth = sideBySide ? (maxWidth * 2) + gap : maxWidth;
+        int outputHeight = sideBySide ? maxHeight : (maxHeight * 2) + gap;
+        var outputSize = new OpenCvSharp.Size(outputWidth, outputHeight);
+        int leftX = 0;
+        int leftY = 0;
+        int rightX = sideBySide ? maxWidth + gap : 0;
+        int rightY = sideBySide ? 0 : maxHeight + gap;
+        var leftCell = new OpenCvSharp.Rect(leftX, leftY, maxWidth, maxHeight);
+        var rightCell = new OpenCvSharp.Rect(rightX, rightY, maxWidth, maxHeight);
+
+        double fps = 30d;
+        if (_leftTrack.IsLoaded && !_leftTrack.IsTemporaryWindowSource && _leftTrack.Fps > 0.001d)
+        {
+            fps = _leftTrack.Fps;
+        }
+        if (_rightTrack.IsLoaded && !_rightTrack.IsTemporaryWindowSource && _rightTrack.Fps > fps)
+        {
+            fps = _rightTrack.Fps;
+        }
+
+        int totalFrames = Math.Max(1, trimOutGlobal - trimInGlobal + 1);
+        int fourCc = VideoWriter.FourCC('m', 'p', '4', 'v');
+        try
+        {
+            using var writer = new VideoWriter(outputPath, fourCc, fps, outputSize, true);
+            if (!writer.IsOpened())
+            {
+                message = "Could not create the output video file.";
+                return false;
+            }
+
+            for (int globalFrame = trimInGlobal; globalFrame <= trimOutGlobal; globalFrame++)
+            {
+                using var canvas = new Mat(outputHeight, outputWidth, MatType.CV_8UC3, Scalar.Black);
+                DrawTrackIntoCombinedCell(canvas, _leftTrack, globalFrame, leftCell);
+                DrawTrackIntoCombinedCell(canvas, _rightTrack, globalFrame, rightCell);
+                writer.Write(canvas);
+
+                int done = (globalFrame - trimInGlobal) + 1;
+                onProgress?.Invoke(Math.Clamp(done / (double)totalFrames, 0d, 1d));
+            }
+        }
+        catch (Exception ex)
+        {
+            message = $"Combined export failed ({ex.Message}).";
+            return false;
+        }
+
+        message = "Combined video saved.";
+        return true;
+    }
+
+    private static void DrawTrackIntoCombinedCell(Mat canvas, VideoTrack track, int globalFrame, OpenCvSharp.Rect cellRect)
+    {
+        if (!track.IsLoaded || track.IsTemporaryWindowSource)
+        {
+            return;
+        }
+
+        int localFrame = globalFrame - track.TimelineStartFrame;
+        if (localFrame < 0 || localFrame > track.LastFrameIndex)
+        {
+            return;
+        }
+
+        using Mat? frame = track.ReadFrame(localFrame);
+        if (frame is null || frame.Empty())
+        {
+            return;
+        }
+
+        int targetWidth = cellRect.Width;
+        int targetHeight = cellRect.Height;
+        double scale = Math.Min(targetWidth / (double)frame.Width, targetHeight / (double)frame.Height);
+        int drawWidth = Math.Max(1, (int)Math.Round(frame.Width * scale));
+        int drawHeight = Math.Max(1, (int)Math.Round(frame.Height * scale));
+        int drawX = cellRect.X + ((targetWidth - drawWidth) / 2);
+        int drawY = cellRect.Y + ((targetHeight - drawHeight) / 2);
+        using var resized = new Mat();
+        Cv2.Resize(frame, resized, new OpenCvSharp.Size(drawWidth, drawHeight), 0, 0, InterpolationFlags.Area);
+        using Mat roi = new Mat(canvas, new OpenCvSharp.Rect(drawX, drawY, drawWidth, drawHeight));
+        resized.CopyTo(roi);
+    }
+
+    private bool HasLoadedVideoTrack() => _leftTrack.IsLoaded || _rightTrack.IsLoaded;
+
+    private bool CanExportTrimRange()
+    {
+        if (_isSavingTrimmedVideos || !HasLoadedVideoTrack() || _globalTrimInFrame is null || _globalTrimOutFrame is null)
+        {
+            return false;
+        }
+
+        int trimIn = GetGlobalTrimIn();
+        int trimOut = GetGlobalTrimOut();
+        return new[] { _leftTrack, _rightTrack }.Any(track => HasTrackTrimOverlap(track, trimIn, trimOut));
+    }
+
+    private bool CanExportCombinedRange()
+    {
+        if (_isSavingTrimmedVideos || _globalTrimInFrame is null || _globalTrimOutFrame is null)
+        {
+            return false;
+        }
+
+        int trimIn = GetGlobalTrimIn();
+        int trimOut = GetGlobalTrimOut();
+        return HasTrackTrimOverlap(_leftTrack, trimIn, trimOut) || HasTrackTrimOverlap(_rightTrack, trimIn, trimOut);
+    }
+
+    private void UpdateTrimActionButtonsState()
+    {
+        bool canExport = CanExportTrimRange();
+        bool canExportCombined = CanExportCombinedRange();
+        if (_saveTrimmedVideosTopBarButton is not null)
+        {
+            _saveTrimmedVideosTopBarButton.Enabled = canExport;
+        }
+        if (_saveCombinedVideoTopBarButton is not null)
+        {
+            _saveCombinedVideoTopBarButton.Enabled = canExportCombined;
+        }
+    }
+
+    private bool HasTrackTrimOverlap(VideoTrack track, int globalTrimIn, int globalTrimOut)
+    {
+        return TryGetTrackTrimRange(track, globalTrimIn, globalTrimOut, out _, out _, out _);
+    }
+
+    private bool TryGetTrackTrimRange(VideoTrack track, int globalTrimIn, int globalTrimOut, out int localStart, out int localEnd, out string reason)
+    {
+        localStart = 0;
+        localEnd = 0;
+        if (!track.IsLoaded)
+        {
+            reason = $"{track.Name}: not loaded.";
+            return false;
+        }
+        if (track.IsTemporaryWindowSource)
+        {
+            reason = $"{track.Name}: app-window source can't be saved as trimmed video.";
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(track.FilePath) || !File.Exists(track.FilePath))
+        {
+            reason = $"{track.Name}: source file missing.";
+            return false;
+        }
+
+        localStart = Math.Max(0, globalTrimIn - track.TimelineStartFrame);
+        localEnd = Math.Min(track.LastFrameIndex, globalTrimOut - track.TimelineStartFrame);
+        if (localStart > localEnd)
+        {
+            reason = $"{track.Name}: selected trim range does not overlap this clip.";
+            return false;
+        }
+
+        reason = string.Empty;
+        return true;
+    }
+
+    private bool TryInstallFfmpegForUser(out string message)
+    {
+        message = "FFmpeg installation did not complete.";
+        using var installForm = new FfmpegInstallProgressForm();
+        installForm.Show(this);
+        installForm.UpdateStatus("Starting FFmpeg installation...");
+        Application.DoEvents();
+        try
+        {
+            (string Label, string Args)[] installSteps =
+            [
+                ("Gyan.FFmpeg", "install --id Gyan.FFmpeg --exact --silent --accept-package-agreements --accept-source-agreements"),
+                ("BtbN.FFmpeg", "install --id BtbN.FFmpeg --exact --silent --accept-package-agreements --accept-source-agreements"),
+                ("ffmpeg (generic)", "install ffmpeg --silent --accept-package-agreements --accept-source-agreements")
+            ];
+            var details = new List<string>();
+
+            for (int index = 0; index < installSteps.Length; index++)
+            {
+                (string label, string args) = installSteps[index];
+                installForm.UpdateStatus($"Installing FFmpeg ({index + 1}/{installSteps.Length}): {label}...");
+                Application.DoEvents();
+
+                if (TryRunProcess("winget", args, 180000, out ProcessRunResult run))
+                {
+                    if (run.ExitCode == 0 && !run.TimedOut)
+                    {
+                        message = "FFmpeg installed successfully.";
+                        installForm.UpdateStatus("FFmpeg installed successfully.");
+                        Application.DoEvents();
+                        return true;
+                    }
+
+                    string stderrTail = GetLastNonEmptyLine(run.StdErr);
+                    string stdoutTail = GetLastNonEmptyLine(run.StdOut);
+                    if (run.TimedOut)
+                    {
+                        details.Add($"{label}: timed out.");
+                    }
+                    else
+                    {
+                        details.Add($"{label}: exit code {run.ExitCode}.");
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(stderrTail))
+                    {
+                        details.Add($"  {stderrTail}");
+                    }
+                    else if (!string.IsNullOrWhiteSpace(stdoutTail))
+                    {
+                        details.Add($"  {stdoutTail}");
+                    }
+                }
+                else
+                {
+                    string errorSummary = string.IsNullOrWhiteSpace(run.ErrorMessage)
+                        ? "could not start winget."
+                        : run.ErrorMessage;
+                    details.Add($"{label}: {errorSummary}");
+                }
+            }
+
+            string detailText = details.Count > 0
+                ? "\n\nDetails:\n" + string.Join("\n", details)
+                : string.Empty;
+            message = "Automatic install failed. You can continue with Accurate mode, or install ffmpeg manually later." + detailText;
+            installForm.UpdateStatus("FFmpeg installation failed.");
+            Application.DoEvents();
+            return false;
+        }
+        finally
+        {
+            installForm.Close();
+        }
+    }
+
+    private static bool TryRunProcess(string fileName, string arguments, int timeoutMs, out ProcessRunResult result)
+    {
+        result = new ProcessRunResult(-1, false, string.Empty, string.Empty, string.Empty);
+        try
+        {
+            using var process = new Process();
+            process.StartInfo = new ProcessStartInfo
+            {
+                FileName = fileName,
+                Arguments = arguments,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            if (!process.Start())
+            {
+                return false;
+            }
+
+            string stdout = process.StandardOutput.ReadToEnd();
+            string stderr = process.StandardError.ReadToEnd();
+            if (!process.WaitForExit(timeoutMs))
+            {
+                try
+                {
+                    process.Kill(true);
+                }
+                catch
+                {
+                }
+                result = new ProcessRunResult(-1, true, stdout, stderr, string.Empty);
+                return false;
+            }
+
+            result = new ProcessRunResult(process.ExitCode, false, stdout, stderr, string.Empty);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            result = new ProcessRunResult(-1, false, string.Empty, string.Empty, ex.Message);
+            return false;
+        }
+    }
+
+    private static string GetLastNonEmptyLine(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        string[] lines = text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return lines.Length == 0 ? string.Empty : lines[^1];
+    }
+
+    private bool TryResolveFfmpegExecutable(out string? executablePath)
+    {
+        executablePath = null;
+        string[] candidates =
+        [
+            Path.Combine(AppContext.BaseDirectory, "ffmpeg.exe"),
+            Path.Combine(Environment.CurrentDirectory, "ffmpeg.exe"),
+            "ffmpeg"
+        ];
+
+        foreach (string candidate in candidates)
+        {
+            if (TryProbeFfmpeg(candidate))
+            {
+                executablePath = candidate;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryProbeFfmpeg(string fileName)
+    {
+        try
+        {
+            using var process = new Process();
+            process.StartInfo = new ProcessStartInfo
+            {
+                FileName = fileName,
+                Arguments = "-version",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            if (!process.Start())
+            {
+                throw new InvalidOperationException("ffmpeg process could not be started.");
+            }
+
+            process.WaitForExit(3000);
+            if (!process.HasExited)
+            {
+                try
+                {
+                    process.Kill(true);
+                }
+                catch
+                {
+                }
+            }
+
+            return process.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool TryExportTrimmedTrackWithFfmpeg(
+        string ffmpegExecutable,
+        TrimExportPlan plan,
+        string outputDirectory,
+        Action<double>? onProgress,
+        out string? outputPath,
+        out string message)
+    {
+        outputPath = null;
+        VideoTrack track = plan.Track;
+        string sourcePath = track.FilePath;
+        string sourceName = Path.GetFileNameWithoutExtension(sourcePath);
+        string modeSuffix = "accurate";
+        string fileName = $"{sourceName}_trim_{plan.LocalStart + 1}-{plan.LocalEnd + 1}_{modeSuffix}.mp4";
+        string candidatePath = Path.Combine(outputDirectory, fileName);
+        int suffix = 1;
+        while (File.Exists(candidatePath))
+        {
+            candidatePath = Path.Combine(outputDirectory, $"{sourceName}_trim_{plan.LocalStart + 1}-{plan.LocalEnd + 1}_{modeSuffix}_{suffix}.mp4");
+            suffix++;
+        }
+
+        double fps = track.Fps > 0.001 ? track.Fps : 30d;
+        double startSeconds = plan.LocalStart / fps;
+        double endSeconds = (plan.LocalEnd + 1) / fps;
+        double durationSeconds = Math.Max(0.001d, endSeconds - startSeconds);
+
+        try
+        {
+            using var process = new Process();
+            process.StartInfo = BuildFfmpegStartInfo(ffmpegExecutable, sourcePath, candidatePath, startSeconds, endSeconds);
+            process.OutputDataReceived += (_, e) =>
+            {
+                if (string.IsNullOrWhiteSpace(e.Data))
+                {
+                    return;
+                }
+
+                if (e.Data.StartsWith("out_time_ms=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string raw = e.Data["out_time_ms=".Length..].Trim();
+                    if (long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out long outTimeMicros))
+                    {
+                        double ratio = Math.Clamp(outTimeMicros / (durationSeconds * 1_000_000d), 0d, 1d);
+                        onProgress?.Invoke(ratio);
+                    }
+                }
+                else if (e.Data.StartsWith("progress=end", StringComparison.OrdinalIgnoreCase))
+                {
+                    onProgress?.Invoke(1d);
+                }
+            };
+
+            string errorOutput = string.Empty;
+            process.ErrorDataReceived += (_, e) =>
+            {
+                if (!string.IsNullOrWhiteSpace(e.Data))
+                {
+                    errorOutput = e.Data;
+                }
+            };
+
+            if (!process.Start())
+            {
+                message = $"{track.Name}: could not start ffmpeg.";
+                return false;
+            }
+
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            process.WaitForExit();
+            onProgress?.Invoke(1d);
+
+            if (process.ExitCode != 0)
+            {
+                if (File.Exists(candidatePath))
+                {
+                    try
+                    {
+                        File.Delete(candidatePath);
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                message = string.IsNullOrWhiteSpace(errorOutput)
+                    ? $"{track.Name} ({modeSuffix}): ffmpeg failed."
+                    : $"{track.Name} ({modeSuffix}): {errorOutput}";
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            if (File.Exists(candidatePath))
+            {
+                try
+                {
+                    File.Delete(candidatePath);
+                }
+                catch
+                {
+                }
+            }
+
+            message = $"{track.Name} ({modeSuffix}): export failed ({ex.Message}).";
+            return false;
+        }
+
+        outputPath = candidatePath;
+        message = $"{track.Name} ({modeSuffix}): saved.";
+        return true;
+    }
+
+    private bool TryExportTrimmedTrackBuiltIn(
+        TrimExportPlan plan,
+        string outputDirectory,
+        Action<double>? onProgress,
+        out string? outputPath,
+        out string message)
+    {
+        outputPath = null;
+        VideoTrack track = plan.Track;
+        string sourceName = Path.GetFileNameWithoutExtension(track.FilePath);
+        string fileName = $"{sourceName}_trim_{plan.LocalStart + 1}-{plan.LocalEnd + 1}_accurate.mp4";
+        string candidatePath = Path.Combine(outputDirectory, fileName);
+        int suffix = 1;
+        while (File.Exists(candidatePath))
+        {
+            candidatePath = Path.Combine(outputDirectory, $"{sourceName}_trim_{plan.LocalStart + 1}-{plan.LocalEnd + 1}_accurate_{suffix}.mp4");
+            suffix++;
+        }
+
+        double fps = track.Fps > 0.001 ? track.Fps : 30d;
+        var frameSize = new OpenCvSharp.Size(Math.Max(1, track.FrameSize.Width), Math.Max(1, track.FrameSize.Height));
+        int fourCc = VideoWriter.FourCC('m', 'p', '4', 'v');
+        try
+        {
+            using var writer = new VideoWriter(candidatePath, fourCc, fps, frameSize, true);
+            if (!writer.IsOpened())
+            {
+                message = $"{track.Name} (accurate): could not open output writer.";
+                return false;
+            }
+
+            int totalFrames = Math.Max(1, plan.LocalEnd - plan.LocalStart + 1);
+            for (int frameIndex = plan.LocalStart; frameIndex <= plan.LocalEnd; frameIndex++)
+            {
+                using Mat? frame = track.ReadFrame(frameIndex);
+                if (frame is null || frame.Empty())
+                {
+                    message = $"{track.Name} (accurate): failed while reading frame {frameIndex + 1:n0}.";
+                    writer.Release();
+                    if (File.Exists(candidatePath))
+                    {
+                        File.Delete(candidatePath);
+                    }
+                    return false;
+                }
+
+                writer.Write(frame);
+                int done = (frameIndex - plan.LocalStart) + 1;
+                onProgress?.Invoke(Math.Clamp(done / (double)totalFrames, 0d, 1d));
+            }
+        }
+        catch (Exception ex)
+        {
+            if (File.Exists(candidatePath))
+            {
+                try
+                {
+                    File.Delete(candidatePath);
+                }
+                catch
+                {
+                }
+            }
+
+            message = $"{track.Name} (accurate): export failed ({ex.Message}).";
+            return false;
+        }
+
+        outputPath = candidatePath;
+        message = $"{track.Name} (accurate): saved.";
+        return true;
+    }
+
+    private static ProcessStartInfo BuildFfmpegStartInfo(
+        string ffmpegExecutable,
+        string sourcePath,
+        string outputPath,
+        double startSeconds,
+        double endSeconds)
+    {
+        string start = startSeconds.ToString("0.000000", CultureInfo.InvariantCulture);
+        string end = endSeconds.ToString("0.000000", CultureInfo.InvariantCulture);
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = ffmpegExecutable,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+
+        psi.ArgumentList.Add("-y");
+        psi.ArgumentList.Add("-hide_banner");
+        psi.ArgumentList.Add("-progress");
+        psi.ArgumentList.Add("pipe:1");
+        psi.ArgumentList.Add("-nostats");
+
+        psi.ArgumentList.Add("-i");
+        psi.ArgumentList.Add(sourcePath);
+        psi.ArgumentList.Add("-ss");
+        psi.ArgumentList.Add(start);
+        psi.ArgumentList.Add("-to");
+        psi.ArgumentList.Add(end);
+        psi.ArgumentList.Add("-c:v");
+        psi.ArgumentList.Add("libx264");
+        psi.ArgumentList.Add("-preset");
+        psi.ArgumentList.Add("medium");
+        psi.ArgumentList.Add("-crf");
+        psi.ArgumentList.Add("17");
+        psi.ArgumentList.Add("-pix_fmt");
+        psi.ArgumentList.Add("yuv420p");
+        psi.ArgumentList.Add("-c:a");
+        psi.ArgumentList.Add("aac");
+        psi.ArgumentList.Add("-b:a");
+        psi.ArgumentList.Add("192k");
+        psi.ArgumentList.Add(outputPath);
+        return psi;
+    }
+
+    private sealed record TrimExportPlan(VideoTrack Track, int LocalStart, int LocalEnd);
+    private sealed record ProcessRunResult(int ExitCode, bool TimedOut, string StdOut, string StdErr, string ErrorMessage);
 
     private static Bitmap CreateCommentsIcon(Color strokeColor)
     {
@@ -1133,6 +2070,14 @@ public partial class Form1 : Form
         _uiToolTip.SetToolTip(alignmentModeCheckBox, "Overlay both sides to check visual alignment");
         _uiToolTip.SetToolTip(playPauseButton, "Play or pause (Space)");
         _uiToolTip.SetToolTip(speedComboBox, "Playback speed");
+        if (_saveTrimmedVideosTopBarButton is not null)
+        {
+            _uiToolTip.SetToolTip(_saveTrimmedVideosTopBarButton, "Save trimmed videos using shared In/Out range (I/O, clear with X)");
+        }
+        if (_saveCombinedVideoTopBarButton is not null)
+        {
+            _uiToolTip.SetToolTip(_saveCombinedVideoTopBarButton, "Save one combined video in current layout (side-by-side or stacked)");
+        }
         if (_clipTimelineCanvas is not null)
         {
             _uiToolTip.SetToolTip(_clipTimelineCanvas, "Drag blue marker to scrub. Drag bars to shift clips. Snap near yellow markers.");
@@ -1175,7 +2120,7 @@ public partial class Form1 : Form
 
         content.Controls.Add(CreateHelpSection(
             "Markers And Comments",
-            "M: add marker on active video\r\nDelete: remove selected marker\r\nC: add timeline comment\r\nClick comment to jump there",
+            "M: add marker on active video\r\nDelete: remove selected marker\r\nI / O: set trim in/out\r\nX: clear active trim\r\nC: add timeline comment\r\nClick comment to jump there",
             CreateHelpMarkersIcon()));
 
         content.Controls.Add(CreateHelpSection(
@@ -1416,11 +2361,15 @@ public partial class Form1 : Form
         }
         else
         {
-            nextBitmap = cachedBitmap;
+            nextBitmap = cachedBitmap!;
         }
         Bitmap? previousBitmap = track.PictureBox.Image as Bitmap;
         track.PictureBox.Image = nextBitmap;
         previousBitmap?.Dispose();
+        if (!_isPlaying)
+        {
+            track.ShowStillFrame();
+        }
 
         track.CurrentFrameIndex = safeFrameIndex;
         if (track.Timeline.Value != safeFrameIndex)
@@ -1770,6 +2719,21 @@ public partial class Form1 : Form
             return AddSharedCommentAtCurrentTimeline();
         }
 
+        if (keyData == Keys.I)
+        {
+            return SetGlobalTrimIn();
+        }
+
+        if (keyData == Keys.O)
+        {
+            return SetGlobalTrimOut();
+        }
+
+        if (keyData == Keys.X)
+        {
+            return ClearGlobalTrim();
+        }
+
         if (_activeTrack is null || !_activeTrack.IsLoaded)
         {
             return base.ProcessCmdKey(ref msg, keyData);
@@ -1861,6 +2825,64 @@ public partial class Form1 : Form
         }
 
         return false;
+    }
+
+    private bool SetGlobalTrimIn()
+    {
+        if (!_leftTrack.IsLoaded && !_rightTrack.IsLoaded)
+        {
+            return false;
+        }
+
+        int trimIn = Math.Clamp(masterTimeline.Value, 0, Math.Max(0, masterTimeline.Maximum));
+        _globalTrimInFrame = trimIn;
+        if (_globalTrimOutFrame is int trimOut && trimOut < trimIn)
+        {
+            _globalTrimOutFrame = trimIn;
+        }
+
+        _clipTimelineCanvas?.Invalidate();
+        UpdatePlaybackStatus();
+        UpdateTrimActionButtonsState();
+        SaveSession();
+        return true;
+    }
+
+    private bool SetGlobalTrimOut()
+    {
+        if (!_leftTrack.IsLoaded && !_rightTrack.IsLoaded)
+        {
+            return false;
+        }
+
+        int trimOut = Math.Clamp(masterTimeline.Value, 0, Math.Max(0, masterTimeline.Maximum));
+        _globalTrimOutFrame = trimOut;
+        if (_globalTrimInFrame is int trimIn && trimIn > trimOut)
+        {
+            _globalTrimInFrame = trimOut;
+        }
+
+        _clipTimelineCanvas?.Invalidate();
+        UpdatePlaybackStatus();
+        UpdateTrimActionButtonsState();
+        SaveSession();
+        return true;
+    }
+
+    private bool ClearGlobalTrim()
+    {
+        if (_globalTrimInFrame is null && _globalTrimOutFrame is null)
+        {
+            return false;
+        }
+
+        _globalTrimInFrame = null;
+        _globalTrimOutFrame = null;
+        _clipTimelineCanvas?.Invalidate();
+        UpdatePlaybackStatus();
+        UpdateTrimActionButtonsState();
+        SaveSession();
+        return true;
     }
 
     private bool StepBothTracks(int delta)
@@ -1967,10 +2989,34 @@ public partial class Form1 : Form
             SyncTrackFromPlayback(_leftTrack);
             SyncTrackFromPlayback(_rightTrack);
         }
+        else
+        {
+            // Safety: if playback surfaces were left visible while paused, always
+            // switch back to still-frame view so rendered frames are not hidden.
+            EnsureStillFrameVisible(_leftTrack);
+            EnsureStillFrameVisible(_rightTrack);
+        }
 
         _isPlaying = false;
         playPauseButton.Text = PlayIcon;
         UpdatePlaybackStatus();
+    }
+
+    private static void EnsureStillFrameVisible(VideoTrack track)
+    {
+        if (!track.IsLoaded || track.IsTemporaryWindowSource)
+        {
+            return;
+        }
+
+        if (track.IsPlaybackVisible || track.IsPlaybackRunning)
+        {
+            track.StopPlayback();
+        }
+        else
+        {
+            track.ShowStillFrame();
+        }
     }
 
     private void SyncTrackFromPlayback(VideoTrack track)
@@ -2077,6 +3123,12 @@ public partial class Form1 : Form
         string playback = _isPlaying ? "Playing" : "Paused";
         int speedPercent = (int)Math.Round(_playbackSpeedMultiplier * 100f);
         playbackStatusLabel.Text = $"{playback} {speedPercent}% speed | {leftStatus} | {rightStatus}";
+        if (_globalTrimInFrame is not null || _globalTrimOutFrame is not null)
+        {
+            int trimIn = GetGlobalTrimIn();
+            int trimOut = GetGlobalTrimOut();
+            playbackStatusLabel.Text += $" | Trim {trimIn + 1:n0}-{trimOut + 1:n0}";
+        }
         if (_showTimelineDebug)
         {
             int global = masterTimeline.Value;
@@ -2086,6 +3138,8 @@ public partial class Form1 : Form
             string rightRange = _rightTrack.IsLoaded ? (rightLocal >= 0 && rightLocal <= _rightTrack.LastFrameIndex ? "in" : "out") : "-";
             playbackStatusLabel.Text += $" | dbg g:{global} A:{leftLocal}({leftRange}) B:{rightLocal}({rightRange})";
         }
+
+        UpdateTrimActionButtonsState();
     }
 
     private void EnsureAllPreviewScrollStates()
@@ -2454,9 +3508,31 @@ public partial class Form1 : Form
         using var playheadPen = new Pen(Color.FromArgb(74, 158, 255), 2f);
         using var playheadHandleBrush = new SolidBrush(Color.FromArgb(74, 158, 255));
         using var playheadHandleOutline = new Pen(Color.FromArgb(210, 235, 255), 1f);
+        using var trimRangeBrush = new SolidBrush(Color.FromArgb(60, 190, 190, 190));
+        using var trimInPen = new Pen(Color.FromArgb(150, 228, 162), 2f);
+        using var trimOutPen = new Pen(Color.FromArgb(255, 164, 164), 2f);
+        using var trimInTextBrush = new SolidBrush(Color.FromArgb(175, 238, 182));
+        using var trimOutTextBrush = new SolidBrush(Color.FromArgb(255, 186, 186));
         using var font = new Font("Segoe UI", 8f, FontStyle.Regular);
 
         DrawTimeRuler(graphics, width, rulerPen, textBrush, font);
+
+        if (_globalTrimInFrame is not null || _globalTrimOutFrame is not null)
+        {
+            int trimInX = Math.Clamp(FrameToTimelineX(GetGlobalTrimIn()), 0, width - 1);
+            int trimOutX = Math.Clamp(FrameToTimelineX(GetGlobalTrimOut()), 0, width - 1);
+            if (trimOutX < trimInX)
+            {
+                (trimInX, trimOutX) = (trimOutX, trimInX);
+            }
+
+            int overlayWidth = Math.Max(1, trimOutX - trimInX + 1);
+            graphics.FillRectangle(trimRangeBrush, new Rectangle(trimInX, 0, overlayWidth, ClipTimelineCanvasHeight - 1));
+            graphics.DrawLine(trimInPen, trimInX, 0, trimInX, ClipTimelineCanvasHeight - 1);
+            graphics.DrawLine(trimOutPen, trimOutX, 0, trimOutX, ClipTimelineCanvasHeight - 1);
+            graphics.DrawString("I", font, trimInTextBrush, Math.Min(width - 10, trimInX + 2), 2);
+            graphics.DrawString("O", font, trimOutTextBrush, Math.Min(width - 10, trimOutX + 2), 2);
+        }
 
         DrawTimelineLane(graphics, ClipTimelineHeaderHeight, laneBrush, laneOutlinePen);
         DrawTrackClip(graphics, _leftTrack, ClipTimelineHeaderHeight, clipBrush, clipOutlinePen, markerBrush, markerOutlinePen, selectedMarkerBrush, selectedMarkerOutlinePen, textBrush, font);
@@ -2644,6 +3720,11 @@ public partial class Form1 : Form
 
     private void ClipTimelineCanvas_MouseDown(object? sender, MouseEventArgs e)
     {
+        if (_clipTimelineCanvas is null)
+        {
+            return;
+        }
+
         if (TrySelectSharedCommentAtPosition(e.Location))
         {
             return;
@@ -2737,7 +3818,7 @@ public partial class Form1 : Form
 
         _draggingTimelineTrack.TimelineStartFrame = nextStart;
         EnsureClipTimelineCanvasWidth();
-        _clipTimelineCanvas.Invalidate();
+        _clipTimelineCanvas?.Invalidate();
 
         long dragNow = Environment.TickCount64;
         if (dragNow - _lastDragStatusTick >= 120)
@@ -3108,6 +4189,18 @@ public partial class Form1 : Form
         RenderTrack(track, localFrame, updateMasterTimeline: false);
     }
 
+    private int GetGlobalTrimIn()
+    {
+        return Math.Clamp(_globalTrimInFrame ?? 0, 0, Math.Max(0, masterTimeline.Maximum));
+    }
+
+    private int GetGlobalTrimOut()
+    {
+        int trimOut = Math.Clamp(_globalTrimOutFrame ?? Math.Max(0, masterTimeline.Maximum), 0, Math.Max(0, masterTimeline.Maximum));
+        int trimIn = GetGlobalTrimIn();
+        return Math.Max(trimIn, trimOut);
+    }
+
     private void ClearTrackPreview(VideoTrack track, bool lightweight = false)
     {
         if (lightweight && track.PictureBox.Image is null)
@@ -3399,6 +4492,13 @@ public partial class Form1 : Form
                 ApplyMarkers(_rightTrack, session.RightMarkers);
             }
 
+            _globalTrimInFrame = ResolveGlobalTrimFrame(session.GlobalTrimInFrame, session.LeftTrimInFrame, session.RightTrimInFrame);
+            _globalTrimOutFrame = ResolveGlobalTrimFrame(session.GlobalTrimOutFrame, session.LeftTrimOutFrame, session.RightTrimOutFrame);
+            if (_globalTrimInFrame is int gIn && _globalTrimOutFrame is int gOut && gOut < gIn)
+            {
+                _globalTrimOutFrame = gIn;
+            }
+
             EnsureClipTimelineCanvasWidth();
             _clipTimelineCanvas?.Invalidate();
 
@@ -3463,6 +4563,29 @@ public partial class Form1 : Form
         return openDialog.ShowDialog(this) == DialogResult.OK ? openDialog.FileName : null;
     }
 
+    private int? ResolveGlobalTrimFrame(int? globalFrame, int? leftTrackFrame, int? rightTrackFrame)
+    {
+        int maxGlobal = Math.Max(0, masterTimeline.Maximum);
+        if (globalFrame is int explicitGlobal)
+        {
+            return Math.Clamp(explicitGlobal, 0, maxGlobal);
+        }
+
+        int? leftGlobal = null;
+        if (leftTrackFrame is int leftLocal && _leftTrack.IsLoaded)
+        {
+            leftGlobal = Math.Clamp(leftLocal + _leftTrack.TimelineStartFrame, 0, maxGlobal);
+        }
+
+        int? rightGlobal = null;
+        if (rightTrackFrame is int rightLocal && _rightTrack.IsLoaded)
+        {
+            rightGlobal = Math.Clamp(rightLocal + _rightTrack.TimelineStartFrame, 0, maxGlobal);
+        }
+
+        return leftGlobal ?? rightGlobal;
+    }
+
     private void SaveSession()
     {
         if (_isRestoringSession)
@@ -3486,6 +4609,12 @@ public partial class Form1 : Form
                 RightTimelineStartFrame: _rightTrack.IsLoaded ? _rightTrack.TimelineStartFrame : 0,
                 LeftMarkers: [.. _leftTrack.Markers],
                 RightMarkers: [.. _rightTrack.Markers],
+                GlobalTrimInFrame: _globalTrimInFrame,
+                GlobalTrimOutFrame: _globalTrimOutFrame,
+                LeftTrimInFrame: null,
+                LeftTrimOutFrame: null,
+                RightTrimInFrame: null,
+                RightTrimOutFrame: null,
                 SharedComments: [.. _sharedComments.Select(c => new SharedCommentData(c.Id, c.FrameIndex, c.Text, c.CreatedAt))],
                 SelectedSharedCommentId: _selectedSharedCommentId,
                 NextSharedCommentId: _nextSharedCommentId,
@@ -3632,6 +4761,122 @@ public partial class Form1 : Form
     private readonly record struct WindowChoice(IntPtr Handle, string Title)
     {
         public override string ToString() => Title;
+    }
+
+    private sealed class FfmpegInstallProgressForm : Form
+    {
+        private readonly Label _statusLabel;
+        private readonly ProgressBar _progressBar;
+
+        public FfmpegInstallProgressForm()
+        {
+            Text = "Installing FFmpeg";
+            StartPosition = FormStartPosition.CenterParent;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MinimizeBox = false;
+            MaximizeBox = false;
+            ShowInTaskbar = false;
+            ControlBox = false;
+            Width = 500;
+            Height = 130;
+            BackColor = Color.FromArgb(28, 28, 28);
+
+            _statusLabel = new Label
+            {
+                Dock = DockStyle.Top,
+                Height = 44,
+                ForeColor = Color.Gainsboro,
+                Padding = new Padding(12, 10, 12, 0),
+                Text = "Preparing installer..."
+            };
+
+            _progressBar = new ProgressBar
+            {
+                Dock = DockStyle.Top,
+                Height = 22,
+                Margin = new Padding(12, 0, 12, 0),
+                Style = ProgressBarStyle.Marquee,
+                MarqueeAnimationSpeed = 28
+            };
+
+            Controls.Add(_progressBar);
+            Controls.Add(_statusLabel);
+        }
+
+        public void UpdateStatus(string status)
+        {
+            _statusLabel.Text = status;
+            _statusLabel.Refresh();
+        }
+    }
+
+    private sealed class TrimExportProgressForm : Form
+    {
+        private readonly Label _statusLabel;
+        private readonly Label _countLabel;
+        private readonly ProgressBar _progressBar;
+        private readonly int _totalJobs;
+
+        public TrimExportProgressForm(int totalJobs)
+        {
+            _totalJobs = Math.Max(1, totalJobs);
+
+            Text = "Saving Trimmed Videos";
+            StartPosition = FormStartPosition.CenterParent;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MinimizeBox = false;
+            MaximizeBox = false;
+            ShowInTaskbar = false;
+            ControlBox = false;
+            Width = 460;
+            Height = 130;
+            BackColor = Color.FromArgb(28, 28, 28);
+
+            _statusLabel = new Label
+            {
+                Dock = DockStyle.Top,
+                Height = 30,
+                ForeColor = Color.Gainsboro,
+                Padding = new Padding(12, 8, 12, 0),
+                Text = "Preparing export..."
+            };
+            _progressBar = new ProgressBar
+            {
+                Dock = DockStyle.Top,
+                Height = 22,
+                Margin = new Padding(12, 0, 12, 0),
+                Minimum = 0,
+                Maximum = _totalJobs * 1000,
+                Value = 0,
+                Style = ProgressBarStyle.Continuous
+            };
+            _countLabel = new Label
+            {
+                Dock = DockStyle.Top,
+                Height = 24,
+                ForeColor = Color.FromArgb(170, 170, 170),
+                Padding = new Padding(12, 4, 12, 0),
+                Text = $"0 / {_totalJobs:n0} jobs"
+            };
+
+            Controls.Add(_countLabel);
+            Controls.Add(_progressBar);
+            Controls.Add(_statusLabel);
+        }
+
+        public void UpdateProgress(int completedJobs, double currentJobRatio, string status)
+        {
+            int safeCompletedJobs = Math.Clamp(completedJobs, 0, _totalJobs);
+            double safeRatio = Math.Clamp(currentJobRatio, 0d, 1d);
+            int barValue = Math.Clamp((safeCompletedJobs * 1000) + (int)Math.Round(safeRatio * 1000d), 0, _progressBar.Maximum);
+            _statusLabel.Text = status;
+            _progressBar.Value = barValue;
+            int shownCompleted = Math.Min(_totalJobs, safeCompletedJobs + (safeRatio >= 0.999 ? 1 : 0));
+            _countLabel.Text = $"{shownCompleted:n0} / {_totalJobs:n0} jobs";
+            _statusLabel.Refresh();
+            _progressBar.Refresh();
+            _countLabel.Refresh();
+        }
     }
 
     private sealed class WindowPickerForm : Form
@@ -3881,6 +5126,10 @@ public partial class Form1 : Form
 
         public int? SelectedMarker { get; set; }
 
+        public int? TrimInFrame { get; set; }
+
+        public int? TrimOutFrame { get; set; }
+
         public float ZoomMultiplier { get; set; }
 
         public int FrameCount { get; private set; }
@@ -3938,6 +5187,8 @@ public partial class Form1 : Form
             SnapLockedMarker = null;
             Markers.Clear();
             SelectedMarker = null;
+            TrimInFrame = null;
+            TrimOutFrame = null;
             ZoomMultiplier = 1.0f;
 
             Timeline.Minimum = 0;
@@ -4182,6 +5433,12 @@ public partial class Form1 : Form
         int? RightTimelineStartFrame,
         List<int>? LeftMarkers,
         List<int>? RightMarkers,
+        int? GlobalTrimInFrame,
+        int? GlobalTrimOutFrame,
+        int? LeftTrimInFrame,
+        int? LeftTrimOutFrame,
+        int? RightTrimInFrame,
+        int? RightTrimOutFrame,
         List<SharedCommentData>? SharedComments,
         int? SelectedSharedCommentId,
         int? NextSharedCommentId,
