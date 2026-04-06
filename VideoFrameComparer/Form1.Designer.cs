@@ -29,6 +29,9 @@ partial class Form1
     private void InitializeComponent()
     {
         topBarPanel = new Panel();
+        restoreVideoSourceButton = new Button();
+        useWindowSourceButton = new Button();
+        alignmentModeCheckBox = new CheckBox();
         helpLabel = new Label();
         speedComboBox = new ComboBox();
         speedLabel = new Label();
@@ -80,6 +83,9 @@ partial class Form1
         // topBarPanel
         // 
         topBarPanel.BackColor = Color.FromArgb(32, 32, 32);
+        topBarPanel.Controls.Add(restoreVideoSourceButton);
+        topBarPanel.Controls.Add(useWindowSourceButton);
+        topBarPanel.Controls.Add(alignmentModeCheckBox);
         topBarPanel.Controls.Add(helpLabel);
         topBarPanel.Controls.Add(layoutComboBox);
         topBarPanel.Controls.Add(layoutLabel);
@@ -89,16 +95,49 @@ partial class Form1
         topBarPanel.Size = new Size(1424, 64);
         topBarPanel.TabIndex = 0;
         // 
+        // 
+        // restoreVideoSourceButton
+        // 
+        restoreVideoSourceButton.Location = new Point(300, 20);
+        restoreVideoSourceButton.Name = "restoreVideoSourceButton";
+        restoreVideoSourceButton.Size = new Size(110, 24);
+        restoreVideoSourceButton.TabIndex = 8;
+        restoreVideoSourceButton.Text = "Back To Video";
+        restoreVideoSourceButton.UseVisualStyleBackColor = true;
+        restoreVideoSourceButton.Click += restoreVideoSourceButton_Click;
+        // 
+        // useWindowSourceButton
+        // 
+        useWindowSourceButton.Location = new Point(154, 20);
+        useWindowSourceButton.Name = "useWindowSourceButton";
+        useWindowSourceButton.Size = new Size(140, 24);
+        useWindowSourceButton.TabIndex = 7;
+        useWindowSourceButton.Text = "Use App Window";
+        useWindowSourceButton.UseVisualStyleBackColor = true;
+        useWindowSourceButton.Click += useWindowSourceButton_Click;
+        // 
+        // alignmentModeCheckBox
+        // 
+        alignmentModeCheckBox.AutoSize = true;
+        alignmentModeCheckBox.ForeColor = Color.Gainsboro;
+        alignmentModeCheckBox.Location = new Point(694, 23);
+        alignmentModeCheckBox.Name = "alignmentModeCheckBox";
+        alignmentModeCheckBox.Size = new Size(111, 19);
+        alignmentModeCheckBox.TabIndex = 10;
+        alignmentModeCheckBox.Text = "Alignment mode";
+        alignmentModeCheckBox.UseVisualStyleBackColor = true;
+        alignmentModeCheckBox.CheckedChanged += alignmentModeCheckBox_CheckedChanged;
+        // 
         // helpLabel
         // 
         helpLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         helpLabel.ForeColor = Color.Gainsboro;
-          helpLabel.Location = new Point(180, 12);
+          helpLabel.Location = new Point(810, 12);
         helpLabel.Name = "helpLabel";
-          helpLabel.Size = new Size(1228, 40);
+          helpLabel.Size = new Size(598, 40);
         helpLabel.TabIndex = 6;
           helpLabel.AutoEllipsis = true;
-          helpLabel.Text = "Click video to set active | Arrow-keys to move frame-by-frame | Shift + arrow-keys for 20 frames | Ctrl + Arrow-keys controls shared timeline | Space plays/pauses | M adds a marker | Select marker + DEL to delete";
+          helpLabel.Text = "Click video to set active | Arrow-keys to move frame-by-frame | Shift + arrow-keys for 20 frames | Ctrl + Arrow-keys controls shared timeline | Space plays/pauses | M adds a marker | C adds a timeline comment";
         helpLabel.TextAlign = ContentAlignment.MiddleRight;
         // 
         // layoutComboBox
@@ -199,7 +238,7 @@ partial class Form1
         speedComboBox.Dock = DockStyle.Fill;
         speedComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
         speedComboBox.FormattingEnabled = true;
-        speedComboBox.Items.AddRange(new object[] { "0.25x", "0.5x", "1x" });
+        speedComboBox.Items.AddRange(new object[] { "25%", "50%", "75%", "100%", "125%", "150%", "200%" });
         speedComboBox.Location = new Point(1321, 0);
         speedComboBox.Margin = new Padding(6, 0, 0, 0);
         speedComboBox.Name = "speedComboBox";
@@ -228,7 +267,7 @@ partial class Form1
         playPauseButton.Name = "playPauseButton";
         playPauseButton.Size = new Size(132, 53);
         playPauseButton.TabIndex = 0;
-        playPauseButton.Text = "Play Both";
+        playPauseButton.Text = "▶";
         playPauseButton.UseVisualStyleBackColor = true;
         playPauseButton.Click += playPauseButton_Click;
         // 
@@ -491,6 +530,9 @@ partial class Form1
     #endregion
 
     private Panel topBarPanel;
+    private Button restoreVideoSourceButton;
+    private Button useWindowSourceButton;
+    private CheckBox alignmentModeCheckBox;
     private Label helpLabel;
     private ComboBox speedComboBox;
     private Label speedLabel;

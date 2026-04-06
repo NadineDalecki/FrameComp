@@ -57,29 +57,29 @@ Comparison projects are stored as JSON files in the local `Projects` folder besi
 ## Run From Source
 
 ```powershell
-cd D:\Programming\VidComp
-$env:DOTNET_CLI_HOME='D:\Programming\VidComp\.dotnet-home'
-$env:NUGET_PACKAGES='D:\Programming\VidComp\.nuget\packages'
+cd D:\Programming\FrameComp
+$env:DOTNET_CLI_HOME='D:\Programming\FrameComp\.dotnet-home'
+$env:NUGET_PACKAGES='D:\Programming\FrameComp\.nuget\packages'
 dotnet run --project .\VideoFrameComparer\VideoFrameComparer.csproj
 ```
 
 ## Publish Locally
 
 ```powershell
-cd D:\Programming\VidComp
+cd D:\Programming\FrameComp
 .\publish.ps1
 ```
 
 That creates the runnable app in:
 
-- `D:\Programming\VidComp\publish\win-x64`
-- and copies the same runtime files to `D:\Programming\VidComp`
+- `D:\Programming\FrameComp\publish\win-x64`
+- and copies the same runtime files to `D:\Programming\FrameComp`
 
 ## Create A Release Zip
 
 ```powershell
-cd D:\Programming\VidComp
+cd D:\Programming\FrameComp
 .\package-release.ps1
 ```
 
-That creates a release archive in `D:\Programming\VidComp\release`.
+That creates a release archive in `D:\Programming\FrameComp\release`.
