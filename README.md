@@ -1,25 +1,35 @@
 # FrameComp
 
-Simple Windows app for comparing two videos frame by frame.
+Windows app for frame-accurate comparison of two videos (or one video + one live app window).
 
 ## Features
 
-- Drag one video into each pane
-- View videos side by side or stacked
-- Select the active video by clicking its pane
-- Temporarily switch a slot to a live app window source with `Use App Window`
-- Return a live window slot back to its video with `Back To Video`
-- Step the active video with arrow keys
-- Hold `Shift` to step 20 frames
-- Hold `Ctrl` with arrow keys to step both videos together
-- Scrub both videos with the shared bottom timeline
-- Play or pause both videos with `Space` or `Play Both`
-- Toggle play/pause globally with `Page Down` (works while app is in background)
-- Change playback speed
-- Zoom a video with the mouse wheel
-- Add markers with `M`
-- Select markers in the marker row and delete them with `Delete`
-- Save comparison projects and reopen them from the startup picker
+- Side-by-side or stacked comparison layout
+- Shared bottom timeline with:
+  - playhead dragging
+  - clip bar dragging (with marker snap)
+  - marker snap feedback while scrubbing
+- Frame stepping and synchronized stepping
+- Playback controls with speed selector (`25%` to `200%`)
+- Marker support:
+  - add marker (`M`)
+  - select/delete marker (`Delete`)
+  - marker snapping while scrubbing and clip moving
+- Shared comments:
+  - add comment at current timeline (`C`)
+  - click comment to jump
+  - inline delete icon per comment
+- Live app window capture per side (`Use App Window` / `Back To Video`)
+- Alignment mode for visual overlay checks (shown when live window mode is active)
+- Built-in help:
+  - top-right `?` button
+  - `F1` shortcut
+  - contextual tooltips
+- Startup project picker with:
+  - open selected project
+  - new project (`+`)
+  - rename project (pencil)
+  - delete project (trash, with confirmation)
 
 ## Download And Run
 
@@ -42,6 +52,8 @@ No separate .NET install should be needed for the published `win-x64` build.
 - `Page Down`: global play/pause toggle (background hotkey)
 - `M`: add a marker on the active video
 - `Delete`: remove the selected marker on the active video
+- `C`: add a shared timeline comment
+- `F1`: open help overlay
 - `Mouse wheel`: zoom the hovered video pane
 
 ## Live Window Source Notes
@@ -53,6 +65,12 @@ No separate .NET install should be needed for the published `win-x64` build.
 ## Project Files
 
 Comparison projects are stored as JSON files in the local `Projects` folder beside the app.
+
+## Notes
+
+- On fresh startup with no comments, the comments sidebar starts collapsed.
+- App startup speed defaults to `100%`.
+- Status line format is `Paused/Playing <speed>% speed | ...`.
 
 ## Run From Source
 

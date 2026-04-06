@@ -4,6 +4,7 @@ using OpenCvSharp;
 using OpenCvSharp.Extensions;
 using System.Runtime.InteropServices;
 using System.Diagnostics;
+using System.Drawing.Drawing2D;
 using DrawingPoint = System.Drawing.Point;
 using DrawingSize = System.Drawing.Size;
 using System.Text.Json;
@@ -17,13 +18,18 @@ public partial class Form1 : Form
     private const int LargeStep = 20;
     private const int MarkerSnapThresholdPixels = 24;
     private const int MarkerSnapReleaseThresholdPixels = 36;
+    private const int GlobalPlayheadSnapThresholdPixels = 12;
+    private const int TrackDragMarkerSnapThresholdPixels = 16;
+    private const int TrackDragMarkerSnapReleaseThresholdPixels = 24;
     private const int MarkerSelectionThresholdPixels = 18;
     private const int SharedCommentSelectionThresholdPixels = 16;
+    private const int CommentDeleteGlyphSize = 12;
+    private const int CommentDeleteGlyphPadding = 6;
     private const int TimelineEdgePadding = 8;
     private const float WheelZoomStep = 1.1f;
     private const float MinZoomMultiplier = 1.0f;
     private const float MaxZoomMultiplier = 8.0f;
-    private const int TopBarHeight = 64;
+    private const int TopBarHeight = 52;
     private const int BottomBarHeight = 104;
     private const int PreviewTitleHeight = 28;
     private const int PreviewMarkerHeight = 24;
@@ -55,10 +61,11 @@ public partial class Form1 : Form
     private readonly List<SharedComment> _sharedComments = [];
     private int? _selectedSharedCommentId;
     private Panel? _sharedCommentsPanel;
-    private ListView? _sharedCommentsListView;
+    private ListBox? _sharedCommentsListBox;
     private Panel? _sharedCommentMarkerPanel;
-    private Button? _toggleCommentsSidebarButton;
-    private Button? _expandCommentsEdgeButton;
+    private Button? _toggleCommentsTopBarButton;
+    private Image? _commentsActiveIcon;
+    private Image? _commentsInactiveIcon;
     private int _nextSharedCommentId = 1;
     private bool _isUpdatingSharedCommentsList;
     private bool _isCommentsSidebarCollapsed;
@@ -80,13 +87,22 @@ public partial class Form1 : Form
     private int _dragStartTrackOffset;
     private bool _isDraggingPlayhead;
     private double _timelinePixelsPerFrame = 1.0;
-    private long _lastTimelineWheelTick;
-    private int _lastTimelineWheelDelta;
-    private bool _timelineZoomInitialized;
-    private long _lastDragPreviewTick;
     private long _lastDragStatusTick;
-    private long _lastPlayheadPreviewTick;
     private bool _showTimelineDebug;
+    private int? _hoverDeleteCommentId;
+    private VideoTrack? _snapPreviewTrack;
+    private int? _snapPreviewMarker;
+    private int? _trackDragSnapOwnMarker;
+    private int? _trackDragSnapTargetGlobalMarkerFrame;
+    private Button? _layoutSideBySideButton;
+    private Button? _layoutStackedButton;
+    private Image? _layoutStackedActiveIcon;
+    private Image? _layoutStackedInactiveIcon;
+    private Image? _layoutSideBySideActiveIcon;
+    private Image? _layoutSideBySideInactiveIcon;
+    private Button? _helpTopBarButton;
+    private Image? _helpIcon;
+    private readonly ToolTip _uiToolTip = new ToolTip();
     private Panel? _transportHostPanel;
     private Panel? _transportLeftPanel;
     private Panel? _transportRightPanel;
@@ -101,7 +117,15 @@ public partial class Form1 : Form
         AppLog.Write("LibVLC instance created.");
 
         InitializeComponent();
+        topBarPanel.Height = TopBarHeight;
+        useWindowSourceButton.Location = new DrawingPoint(useWindowSourceButton.Left, 14);
+        helpLabel.Visible = false;
+        restoreVideoSourceButton.Visible = false;
+        alignmentModeCheckBox.Visible = false;
+        InitializeLayoutQuickButtons();
         bottomTransportPanel.Height = BottomBarHeight;
+        playbackStatusLabel.ForeColor = Color.FromArgb(145, 145, 145);
+        playbackStatusLabel.Font = new Font("Segoe UI", 8f, FontStyle.Regular);
         InitializeSharedCommentsUi();
         InitializeAlignmentOverlay();
 
@@ -134,6 +158,8 @@ public partial class Form1 : Form
         HookTrack(_rightTrack);
         ConfigureTrackLayout(_leftTrack);
         ConfigureTrackLayout(_rightTrack);
+        UpdateEmptyHintState(_leftTrack);
+        UpdateEmptyHintState(_rightTrack);
         leftImagePanel.Resize += (_, _) => ApplyScale(_leftTrack);
         rightImagePanel.Resize += (_, _) => ApplyScale(_rightTrack);
         _playbackTimer = new System.Windows.Forms.Timer { Interval = 33 };
@@ -150,6 +176,17 @@ public partial class Form1 : Form
         UpdatePlaybackStatus();
         Text = $"Video Frame Comparer - {Path.GetFileNameWithoutExtension(_projectFilePath)}";
         RestoreSession();
+        speedComboBox.SelectedIndex = 3;
+        _playbackSpeedMultiplier = PlaybackSpeedOptions[3];
+        _isCommentsSidebarCollapsed = _sharedComments.Count == 0;
+        UpdateLayoutMode();
+        UpdateCommentsSidebarButtonText();
+        topBarPanel.Resize += (_, _) => LayoutTopBarButtons();
+        topBarPanel.Resize += (_, _) => LayoutTopBarControls();
+        LayoutTopBarButtons();
+        LayoutTopBarControls();
+        InitializeHelpUi();
+        ConfigureTooltips();
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -289,6 +326,7 @@ public partial class Form1 : Form
         track.Timeline.Visible = false;
         track.MarkerPanel.Visible = false;
         track.MarkerPanel.BorderStyle = BorderStyle.None;
+        track.PictureBox.Visible = false;
         if (track.FooterPanel.Parent is TableLayoutPanel trackLayout && trackLayout.RowStyles.Count >= 3)
         {
             trackLayout.RowStyles[2].Height = 0f;
@@ -307,48 +345,24 @@ public partial class Form1 : Form
         };
         _sharedCommentsPanel = sidebar;
 
-        var sidebarHeaderPanel = new Panel
-        {
-            Dock = DockStyle.Top,
-            Height = 24
-        };
-        var sidebarHeader = new Label
+        var listBox = new ListBox
         {
             Dock = DockStyle.Fill,
-            ForeColor = Color.Gainsboro,
-            Font = new Font("Segoe UI Semibold", 10f, FontStyle.Bold),
-            Text = "Discussion",
-            TextAlign = ContentAlignment.MiddleLeft
-        };
-
-        var sidebarHint = new Label
-        {
-            Dock = DockStyle.Bottom,
-            Height = 20,
-            ForeColor = Color.FromArgb(170, 170, 170),
-            Text = "Press C to add comment",
-            TextAlign = ContentAlignment.MiddleLeft
-        };
-
-        var listView = new ListView
-        {
-            Dock = DockStyle.Fill,
-            View = View.Details,
-            FullRowSelect = true,
-            HideSelection = false,
-            GridLines = false,
-            HeaderStyle = ColumnHeaderStyle.Nonclickable,
+            BorderStyle = BorderStyle.None,
             BackColor = Color.FromArgb(24, 24, 24),
-            ForeColor = Color.Gainsboro
+            ForeColor = Color.Gainsboro,
+            IntegralHeight = false,
+            DrawMode = DrawMode.OwnerDrawVariable
         };
-        listView.Columns.Add("Time", 84, HorizontalAlignment.Left);
-        listView.Columns.Add("Comment", 400, HorizontalAlignment.Left);
-        listView.SelectedIndexChanged += SharedCommentsListView_SelectedIndexChanged;
-        _sharedCommentsListView = listView;
+        listBox.MeasureItem += SharedCommentsListBox_MeasureItem;
+        listBox.DrawItem += SharedCommentsListBox_DrawItem;
+        listBox.SelectedIndexChanged += SharedCommentsListBox_SelectedIndexChanged;
+        listBox.MouseDown += SharedCommentsListBox_MouseDown;
+        listBox.MouseMove += SharedCommentsListBox_MouseMove;
+        listBox.MouseLeave += SharedCommentsListBox_MouseLeave;
+        _sharedCommentsListBox = listBox;
 
-        sidebar.Controls.Add(listView);
-        sidebar.Controls.Add(sidebarHint);
-        sidebar.Controls.Add(sidebarHeaderPanel);
+        sidebar.Controls.Add(listBox);
 
         if (videosTableLayout.ColumnCount < 3)
         {
@@ -371,16 +385,9 @@ public partial class Form1 : Form
         _sharedCommentMarkerPanel.Paint += (_, e) => DrawSharedCommentMarkers(e.Graphics);
         _sharedCommentMarkerPanel.MouseDown += SharedCommentMarkerPanel_MouseDown;
 
-        _toggleCommentsSidebarButton = new Button
-        {
-            Name = "toggleCommentsSidebarButton",
-            Dock = DockStyle.Right,
-            Width = 26,
-            TabIndex = 9,
-            Text = "<",
-            UseVisualStyleBackColor = true
-        };
-        _toggleCommentsSidebarButton.Click += (_, _) =>
+        _toggleCommentsTopBarButton = CreateLayoutButton(
+            location: new DrawingPoint(108, 18),
+            onClick: () =>
         {
             _isCommentsSidebarCollapsed = !_isCommentsSidebarCollapsed;
             _suppressAutoWindowResize = true;
@@ -393,37 +400,242 @@ public partial class Form1 : Form
                 _suppressAutoWindowResize = false;
             }
             UpdateCommentsSidebarButtonText();
-        };
-        sidebarHeaderPanel.Controls.Add(_toggleCommentsSidebarButton);
-        sidebarHeaderPanel.Controls.Add(sidebarHeader);
+        });
+        _commentsActiveIcon = CreateCommentsIcon(Color.FromArgb(238, 238, 238));
+        _commentsInactiveIcon = CreateCommentsIcon(Color.FromArgb(140, 140, 140));
+        _toggleCommentsTopBarButton.Image = _isCommentsSidebarCollapsed ? _commentsInactiveIcon : _commentsActiveIcon;
+        _toggleCommentsTopBarButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        topBarPanel.Controls.Add(_toggleCommentsTopBarButton);
+        _toggleCommentsTopBarButton.BringToFront();
+        LayoutTopBarButtons();
+    }
 
-        _expandCommentsEdgeButton = new Button
+    private void LayoutTopBarButtons()
+    {
+        if (_toggleCommentsTopBarButton is null || _helpTopBarButton is null)
         {
-            Name = "expandCommentsEdgeButton",
-            Anchor = AnchorStyles.Top | AnchorStyles.Right,
-            Size = new DrawingSize(20, 24),
-            Location = new DrawingPoint(topBarPanel.Width - 24, 20),
-            Width = 20,
-            Text = "<",
-            Visible = false,
-            FlatStyle = FlatStyle.Popup,
-            TabStop = false
-        };
-        _expandCommentsEdgeButton.Click += (_, _) =>
+            return;
+        }
+
+        int rightMargin = 14;
+        int y = 12;
+        int gap = 6;
+        int commentsX = Math.Max(0, topBarPanel.ClientSize.Width - _toggleCommentsTopBarButton.Width - rightMargin);
+        int helpX = Math.Max(0, commentsX - _helpTopBarButton.Width - gap);
+        _helpTopBarButton.Location = new DrawingPoint(helpX, y);
+        _toggleCommentsTopBarButton.Location = new DrawingPoint(
+            commentsX,
+            y);
+        _helpTopBarButton.BringToFront();
+        _toggleCommentsTopBarButton.BringToFront();
+    }
+
+    private void LayoutTopBarControls()
+    {
+        alignmentModeCheckBox.Location = new DrawingPoint(
+            useWindowSourceButton.Right + 12,
+            useWindowSourceButton.Top + 3);
+        alignmentModeCheckBox.BringToFront();
+    }
+
+    private static Bitmap CreateCommentsIcon(Color strokeColor)
+    {
+        var bmp = new Bitmap(18, 18);
+        using Graphics g = Graphics.FromImage(bmp);
+        g.Clear(Color.Transparent);
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using var pen = new Pen(strokeColor, 1.5f);
+        using (GraphicsPath topBubble = CreateRoundedRectPath(new Rectangle(2, 2, 10, 8), 2))
         {
-            _isCommentsSidebarCollapsed = false;
-            _suppressAutoWindowResize = true;
-            try
+            g.DrawPath(pen, topBubble);
+        }
+        g.DrawLine(pen, 5, 10, 4, 14);
+        using (GraphicsPath bottomBubble = CreateRoundedRectPath(new Rectangle(6, 7, 10, 8), 2))
+        {
+            g.DrawPath(pen, bottomBubble);
+        }
+        g.DrawLine(pen, 13, 15, 12, 17);
+        return bmp;
+    }
+
+    private static GraphicsPath CreateRoundedRectPath(Rectangle rect, int radius)
+    {
+        int diameter = Math.Max(2, radius * 2);
+        int arcWidth = Math.Min(diameter, rect.Width);
+        int arcHeight = Math.Min(diameter, rect.Height);
+        int right = rect.X + rect.Width - arcWidth;
+        int bottom = rect.Y + rect.Height - arcHeight;
+
+        var path = new GraphicsPath();
+        path.AddArc(rect.X, rect.Y, arcWidth, arcHeight, 180, 90);
+        path.AddArc(right, rect.Y, arcWidth, arcHeight, 270, 90);
+        path.AddArc(right, bottom, arcWidth, arcHeight, 0, 90);
+        path.AddArc(rect.X, bottom, arcWidth, arcHeight, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
+    private void SharedCommentsListBox_SelectedIndexChanged(object? sender, EventArgs e)
+    {
+        if (_isUpdatingSharedCommentsList)
+        {
+            return;
+        }
+
+        if (_sharedCommentsListBox?.SelectedItem is SharedComment comment)
+        {
+            SelectSharedComment(comment.Id, moveTimelineToComment: true);
+        }
+    }
+
+    private void SharedCommentsListBox_MeasureItem(object? sender, MeasureItemEventArgs e)
+    {
+        if (e.Index < 0 || _sharedCommentsListBox is null || _sharedCommentsListBox.Items[e.Index] is not SharedComment comment)
+        {
+            e.ItemHeight = 24;
+            return;
+        }
+
+        int contentWidth = Math.Max(80, _sharedCommentsListBox.ClientSize.Width - 10 - CommentDeleteGlyphSize - (CommentDeleteGlyphPadding * 2));
+        string text = $"{FrameToSharedTimestamp(comment.FrameIndex)}  {comment.Text}";
+        DrawingSize size = TextRenderer.MeasureText(
+            text,
+            _sharedCommentsListBox.Font,
+            new DrawingSize(contentWidth, int.MaxValue),
+            TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.LeftAndRightPadding);
+        e.ItemHeight = Math.Max(24, size.Height + 8);
+    }
+
+    private void SharedCommentsListBox_DrawItem(object? sender, DrawItemEventArgs e)
+    {
+        if (e.Index < 0 || _sharedCommentsListBox is null || _sharedCommentsListBox.Items[e.Index] is not SharedComment comment)
+        {
+            return;
+        }
+
+        bool selected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
+        Color backColor = selected ? Color.FromArgb(42, 72, 104) : _sharedCommentsListBox.BackColor;
+        using var backBrush = new SolidBrush(backColor);
+        e.Graphics.FillRectangle(backBrush, e.Bounds);
+
+        string text = $"{FrameToSharedTimestamp(comment.FrameIndex)}  {comment.Text}";
+        Rectangle deleteBounds = GetCommentDeleteBounds(e.Bounds);
+        Rectangle textBounds = new Rectangle(
+            e.Bounds.X + 4,
+            e.Bounds.Y + 4,
+            Math.Max(10, deleteBounds.Left - e.Bounds.X - 8),
+            Math.Max(10, e.Bounds.Height - 8));
+        Color textColor = selected ? Color.FromArgb(235, 245, 255) : _sharedCommentsListBox.ForeColor;
+        TextRenderer.DrawText(
+            e.Graphics,
+            text,
+            _sharedCommentsListBox.Font,
+            textBounds,
+            textColor,
+            TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.LeftAndRightPadding);
+
+        bool deleteHover = _hoverDeleteCommentId == comment.Id;
+        Color deleteColor = deleteHover
+            ? Color.FromArgb(255, 132, 132)
+            : selected ? Color.FromArgb(245, 205, 205) : Color.FromArgb(198, 150, 150);
+        TextRenderer.DrawText(
+            e.Graphics,
+            "×",
+            _sharedCommentsListBox.Font,
+            deleteBounds,
+            deleteColor,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+
+        e.DrawFocusRectangle();
+    }
+
+    private void SharedCommentsListBox_MouseDown(object? sender, MouseEventArgs e)
+    {
+        if (_sharedCommentsListBox is null || e.Button != MouseButtons.Left)
+        {
+            return;
+        }
+
+        int index = _sharedCommentsListBox.IndexFromPoint(e.Location);
+        if (index < 0 || index >= _sharedCommentsListBox.Items.Count || _sharedCommentsListBox.Items[index] is not SharedComment comment)
+        {
+            return;
+        }
+
+        Rectangle itemBounds = _sharedCommentsListBox.GetItemRectangle(index);
+        Rectangle deleteBounds = GetCommentDeleteBounds(itemBounds);
+        if (!deleteBounds.Contains(e.Location))
+        {
+            return;
+        }
+
+        RemoveSharedComment(comment.Id);
+    }
+
+    private void SharedCommentsListBox_MouseMove(object? sender, MouseEventArgs e)
+    {
+        if (_sharedCommentsListBox is null)
+        {
+            return;
+        }
+
+        int? nextHoverId = null;
+        int index = _sharedCommentsListBox.IndexFromPoint(e.Location);
+        if (index >= 0 && index < _sharedCommentsListBox.Items.Count && _sharedCommentsListBox.Items[index] is SharedComment comment)
+        {
+            Rectangle itemBounds = _sharedCommentsListBox.GetItemRectangle(index);
+            if (GetCommentDeleteBounds(itemBounds).Contains(e.Location))
             {
-                UpdateLayoutMode();
+                nextHoverId = comment.Id;
             }
-            finally
-            {
-                _suppressAutoWindowResize = false;
-            }
-            UpdateCommentsSidebarButtonText();
-        };
-        topBarPanel.Controls.Add(_expandCommentsEdgeButton);
+        }
+
+        if (_hoverDeleteCommentId != nextHoverId)
+        {
+            _hoverDeleteCommentId = nextHoverId;
+            _sharedCommentsListBox.Invalidate();
+            _sharedCommentsListBox.Cursor = nextHoverId.HasValue ? Cursors.Hand : Cursors.Default;
+        }
+    }
+
+    private void SharedCommentsListBox_MouseLeave(object? sender, EventArgs e)
+    {
+        if (_sharedCommentsListBox is null || !_hoverDeleteCommentId.HasValue)
+        {
+            return;
+        }
+
+        _hoverDeleteCommentId = null;
+        _sharedCommentsListBox.Cursor = Cursors.Default;
+        _sharedCommentsListBox.Invalidate();
+    }
+
+    private static Rectangle GetCommentDeleteBounds(Rectangle itemBounds)
+    {
+        int size = CommentDeleteGlyphSize;
+        int x = itemBounds.Right - CommentDeleteGlyphPadding - size;
+        int y = itemBounds.Y + Math.Max(0, (itemBounds.Height - size) / 2);
+        return new Rectangle(x, y, size, size);
+    }
+
+    private void RemoveSharedComment(int commentId)
+    {
+        int index = _sharedComments.FindIndex(c => c.Id == commentId);
+        if (index < 0)
+        {
+            return;
+        }
+
+        _sharedComments.RemoveAt(index);
+        if (_selectedSharedCommentId == commentId)
+        {
+            _selectedSharedCommentId = _sharedComments.Count > 0
+                ? _sharedComments[Math.Clamp(index, 0, _sharedComments.Count - 1)].Id
+                : null;
+        }
+
+        UpdateSharedCommentsUi();
+        SaveSession();
     }
 
     private void InitializeClipTimelineUi()
@@ -459,6 +671,8 @@ public partial class Form1 : Form
                     SaveSession();
                 }
             }
+            ClearSnapPreview();
+            ClearTrackDragSnap();
             _draggingTimelineTrack = null;
             _isDraggingPlayhead = false;
             _clipTimelineCanvas.Cursor = Cursors.Default;
@@ -469,8 +683,6 @@ public partial class Form1 : Form
         _clipTimelineViewport.Resize += (_, _) =>
         {
             EnsureClipTimelineCanvasWidth();
-            // Always start from global frame 0 on open so both previews reflect the same startup playhead.
-            SetGlobalTimelineFrame(0);
             _clipTimelineCanvas?.Invalidate();
         };
 
@@ -576,26 +788,6 @@ public partial class Form1 : Form
         playbackStatusLabel.Bounds = new Rectangle(0, timelineHeight, rightWidth, statusHeight);
     }
 
-    private void SharedCommentsListView_SelectedIndexChanged(object? sender, EventArgs e)
-    {
-        if (_isUpdatingSharedCommentsList)
-        {
-            return;
-        }
-
-        if (_sharedCommentsListView is null || _sharedCommentsListView.SelectedItems.Count == 0)
-        {
-            return;
-        }
-
-        if (_sharedCommentsListView.SelectedItems[0].Tag is not SharedComment comment)
-        {
-            return;
-        }
-
-        SelectSharedComment(comment.Id, moveTimelineToComment: true);
-    }
-
     private void LoadVideoIntoTrack(VideoTrack track, string filePath)
     {
         AppLog.Write($"Loading {track.Name}: {filePath}");
@@ -607,7 +799,6 @@ public partial class Form1 : Form
         track.MarkerPanel.Invalidate();
         SetActiveTrack(track);
         UpdateVideoFit();
-        _timelineZoomInitialized = false;
         UpdateMasterTimelineBounds();
         EnsureClipTimelineCanvasWidth();
         _clipTimelineCanvas?.Invalidate();
@@ -646,6 +837,12 @@ public partial class Form1 : Form
 
     private void useWindowSourceButton_Click(object sender, EventArgs e)
     {
+        if (GetTrackToRestore() is not null)
+        {
+            RestoreTemporaryWindowSource();
+            return;
+        }
+
         if (_activeTrack is null)
         {
             return;
@@ -674,24 +871,7 @@ public partial class Form1 : Form
 
     private void restoreVideoSourceButton_Click(object sender, EventArgs e)
     {
-        VideoTrack? trackToRestore = _activeTrack?.IsTemporaryWindowSource == true
-            ? _activeTrack
-            : _leftTrack.IsTemporaryWindowSource ? _leftTrack
-            : _rightTrack.IsTemporaryWindowSource ? _rightTrack
-            : null;
-        if (trackToRestore is null)
-        {
-            return;
-        }
-
-        StopPlayback();
-        trackToRestore.ClearTemporaryWindowSource();
-        RenderTrack(trackToRestore, trackToRestore.CurrentFrameIndex, updateMasterTimeline: false);
-        SetActiveTrack(trackToRestore);
-        UpdateWindowSourceTimerState();
-        UpdateMasterTimelineBounds();
-        UpdateTrackInfo(trackToRestore);
-        UpdatePlaybackStatus();
+        RestoreTemporaryWindowSource();
     }
 
     private void WindowSourceTimer_Tick(object? sender, EventArgs e)
@@ -758,8 +938,24 @@ public partial class Form1 : Form
         {
             _windowSourceTimer.Stop();
         }
+        useWindowSourceButton.Text = hasTemporarySource ? "Back To Video" : "Use App Window";
+        useWindowSourceButton.Enabled = true;
+        UpdateAlignmentModeAvailability();
+        LayoutTopBarControls();
+        UpdateEmptyHintState(_leftTrack);
+        UpdateEmptyHintState(_rightTrack);
+    }
 
-        restoreVideoSourceButton.Enabled = hasTemporarySource;
+    private void UpdateAlignmentModeAvailability()
+    {
+        bool hasTemporarySource = _leftTrack.IsTemporaryWindowSource || _rightTrack.IsTemporaryWindowSource;
+        if (!hasTemporarySource && alignmentModeCheckBox.Checked)
+        {
+            alignmentModeCheckBox.Checked = false;
+        }
+
+        alignmentModeCheckBox.Visible = hasTemporarySource;
+        alignmentModeCheckBox.Enabled = hasTemporarySource;
     }
 
     private static string? TryGetDroppedVideoPath(IDataObject? data)
@@ -779,12 +975,65 @@ public partial class Form1 : Form
         _activeTrack = track;
         SelectTrackPanel(_leftTrack, track == _leftTrack);
         SelectTrackPanel(_rightTrack, track == _rightTrack);
-        restoreVideoSourceButton.Enabled = _leftTrack.IsTemporaryWindowSource || _rightTrack.IsTemporaryWindowSource;
-        useWindowSourceButton.Enabled = true;
+        UpdateWindowSourceTimerState();
+        UpdateEmptyHintState(_leftTrack);
+        UpdateEmptyHintState(_rightTrack);
         track.MarkerPanel.Invalidate();
         (_activeTrack == _leftTrack ? _rightTrack : _leftTrack).MarkerPanel.Invalidate();
         _leftTrack.ImagePanel.Invalidate();
         _rightTrack.ImagePanel.Invalidate();
+        UpdatePlaybackStatus();
+    }
+
+    private static void UpdateEmptyHintState(VideoTrack track)
+    {
+        bool showHint = !track.IsLoaded && !track.IsTemporaryWindowSource;
+        if (showHint)
+        {
+            if (track.PictureBox.Image is Bitmap previousBitmap)
+            {
+                track.PictureBox.Image = null;
+                previousBitmap.Dispose();
+            }
+
+            track.PlaybackView.Visible = false;
+            track.PictureBox.Visible = false;
+            track.ImagePanel.AutoScrollMinSize = DrawingSize.Empty;
+            track.ImagePanel.AutoScrollPosition = new DrawingPoint(0, 0);
+            track.ImagePanel.Invalidate();
+            return;
+        }
+
+        if (!track.IsPlaybackVisible)
+        {
+            track.PictureBox.Visible = true;
+        }
+    }
+
+    private VideoTrack? GetTrackToRestore()
+    {
+        return _activeTrack?.IsTemporaryWindowSource == true
+            ? _activeTrack
+            : _leftTrack.IsTemporaryWindowSource ? _leftTrack
+            : _rightTrack.IsTemporaryWindowSource ? _rightTrack
+            : null;
+    }
+
+    private void RestoreTemporaryWindowSource()
+    {
+        VideoTrack? trackToRestore = GetTrackToRestore();
+        if (trackToRestore is null)
+        {
+            return;
+        }
+
+        StopPlayback();
+        trackToRestore.ClearTemporaryWindowSource();
+        RenderTrack(trackToRestore, trackToRestore.CurrentFrameIndex, updateMasterTimeline: false);
+        SetActiveTrack(trackToRestore);
+        UpdateWindowSourceTimerState();
+        UpdateMasterTimelineBounds();
+        UpdateTrackInfo(trackToRestore);
         UpdatePlaybackStatus();
     }
 
@@ -804,6 +1053,334 @@ public partial class Form1 : Form
         track.TitleLabel.BackColor = isActive ? Color.FromArgb(50, 110, 170) : Color.FromArgb(45, 45, 45);
     }
 
+    private void InitializeLayoutQuickButtons()
+    {
+        layoutLabel.Visible = false;
+        layoutComboBox.Visible = false;
+
+        _layoutStackedButton = CreateLayoutButton(
+            location: new DrawingPoint(24, 12),
+            onClick: () => layoutComboBox.SelectedIndex = 1);
+        _layoutSideBySideButton = CreateLayoutButton(
+            location: new DrawingPoint(66, 12),
+            onClick: () => layoutComboBox.SelectedIndex = 0);
+
+        _layoutStackedActiveIcon = CreateLayoutIcon(stacked: true, Color.FromArgb(238, 238, 238));
+        _layoutStackedInactiveIcon = CreateLayoutIcon(stacked: true, Color.FromArgb(140, 140, 140));
+        _layoutSideBySideActiveIcon = CreateLayoutIcon(stacked: false, Color.FromArgb(238, 238, 238));
+        _layoutSideBySideInactiveIcon = CreateLayoutIcon(stacked: false, Color.FromArgb(140, 140, 140));
+
+        topBarPanel.Controls.Add(_layoutStackedButton);
+        topBarPanel.Controls.Add(_layoutSideBySideButton);
+        _layoutStackedButton.BringToFront();
+        _layoutSideBySideButton.BringToFront();
+
+        UpdateLayoutButtonsState();
+    }
+
+    private void InitializeHelpUi()
+    {
+        _helpTopBarButton = CreateLayoutButton(
+            location: new DrawingPoint(0, 12),
+            onClick: ShowHelpOverlay);
+        _helpIcon = CreateHelpIcon(Color.FromArgb(238, 238, 238));
+        _helpTopBarButton.Image = _helpIcon;
+        _helpTopBarButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        topBarPanel.Controls.Add(_helpTopBarButton);
+        _helpTopBarButton.BringToFront();
+        LayoutTopBarButtons();
+    }
+
+    private static Bitmap CreateHelpIcon(Color strokeColor)
+    {
+        var bmp = new Bitmap(18, 18);
+        using Graphics g = Graphics.FromImage(bmp);
+        g.Clear(Color.Transparent);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var pen = new Pen(strokeColor, 1.5f);
+        using var brush = new SolidBrush(strokeColor);
+        g.DrawEllipse(pen, 2, 2, 14, 14);
+        using var font = new Font("Segoe UI Semibold", 9f, FontStyle.Bold, GraphicsUnit.Pixel);
+        g.DrawString("?", font, brush, new RectangleF(4, 2, 10, 13), new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
+        return bmp;
+    }
+
+    private void ConfigureTooltips()
+    {
+        _uiToolTip.ShowAlways = true;
+        _uiToolTip.InitialDelay = 250;
+        _uiToolTip.ReshowDelay = 100;
+        _uiToolTip.AutoPopDelay = 7000;
+
+        if (_layoutStackedButton is not null)
+        {
+            _uiToolTip.SetToolTip(_layoutStackedButton, "Stacked layout");
+        }
+        if (_layoutSideBySideButton is not null)
+        {
+            _uiToolTip.SetToolTip(_layoutSideBySideButton, "Side-by-side layout");
+        }
+        if (_toggleCommentsTopBarButton is not null)
+        {
+            _uiToolTip.SetToolTip(_toggleCommentsTopBarButton, "Show or hide comments");
+        }
+        if (_helpTopBarButton is not null)
+        {
+            _uiToolTip.SetToolTip(_helpTopBarButton, "Help (F1)");
+        }
+
+        _uiToolTip.SetToolTip(useWindowSourceButton, "Capture a live app window for the active side");
+        _uiToolTip.SetToolTip(alignmentModeCheckBox, "Overlay both sides to check visual alignment");
+        _uiToolTip.SetToolTip(playPauseButton, "Play or pause (Space)");
+        _uiToolTip.SetToolTip(speedComboBox, "Playback speed");
+        if (_clipTimelineCanvas is not null)
+        {
+            _uiToolTip.SetToolTip(_clipTimelineCanvas, "Drag blue marker to scrub. Drag bars to shift clips. Snap near yellow markers.");
+        }
+    }
+
+    private void ShowHelpOverlay()
+    {
+        using var helpForm = new Form
+        {
+            Text = "FrameComp Help",
+            StartPosition = FormStartPosition.CenterParent,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            ShowInTaskbar = false,
+            Width = 560,
+            Height = 520,
+            BackColor = Color.FromArgb(24, 24, 24)
+        };
+
+        var content = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = true,
+            BackColor = Color.FromArgb(24, 24, 24),
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            Padding = new Padding(14, 12, 14, 8)
+        };
+        content.Controls.Add(CreateHelpSection(
+            "Playback",
+            "Space: Play/Pause\r\nSpeed dropdown: playback speed",
+            CreateHelpPlaybackIcon()));
+
+        content.Controls.Add(CreateHelpSection(
+            "Timeline",
+            "Drag blue marker: scrub timeline\r\nClick timeline: jump and keep dragging\r\nDrag clip bars: move clip timing\r\nYellow markers snap when close",
+            CreateHelpTimelineIcon()));
+
+        content.Controls.Add(CreateHelpSection(
+            "Markers And Comments",
+            "M: add marker on active video\r\nDelete: remove selected marker\r\nC: add timeline comment\r\nClick comment to jump there",
+            CreateHelpMarkersIcon()));
+
+        content.Controls.Add(CreateHelpSection(
+            "Keyboard",
+            "Arrow keys: frame-step active video\r\nShift + Arrows: larger step\r\nCtrl + Arrows: move shared timeline\r\nF1: open this help",
+            CreateHelpKeyboardIcon()));
+
+        var footer = new Label
+        {
+            Dock = DockStyle.Bottom,
+            Height = 26,
+            TextAlign = ContentAlignment.MiddleRight,
+            ForeColor = Color.FromArgb(145, 145, 145),
+            Text = "Press Esc to close",
+            Padding = new Padding(0, 0, 8, 0)
+        };
+        helpForm.Controls.Add(content);
+        helpForm.Controls.Add(footer);
+        helpForm.KeyPreview = true;
+        helpForm.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Escape)
+            {
+                helpForm.Close();
+            }
+        };
+        helpForm.ShowDialog(this);
+    }
+
+    private static Panel CreateHelpSection(string title, string body, Bitmap icon)
+    {
+        var section = new Panel
+        {
+            Width = 500,
+            Height = 108,
+            Margin = new Padding(0, 0, 0, 8),
+            BackColor = Color.Transparent
+        };
+        var iconBox = new PictureBox
+        {
+            Location = new DrawingPoint(0, 4),
+            Size = new DrawingSize(24, 24),
+            SizeMode = PictureBoxSizeMode.CenterImage,
+            Image = icon
+        };
+        var heading = new Label
+        {
+            AutoSize = false,
+            Location = new DrawingPoint(30, 0),
+            Width = 460,
+            Height = 24,
+            ForeColor = Color.FromArgb(225, 225, 225),
+            Font = new Font("Segoe UI Semibold", 10f, FontStyle.Bold),
+            Text = title
+        };
+        var text = new Label
+        {
+            AutoSize = false,
+            Location = new DrawingPoint(30, 24),
+            Width = 460,
+            Height = 80,
+            ForeColor = Color.FromArgb(170, 170, 170),
+            Font = new Font("Segoe UI", 9f, FontStyle.Regular),
+            Text = body
+        };
+        section.Controls.Add(iconBox);
+        section.Controls.Add(heading);
+        section.Controls.Add(text);
+        return section;
+    }
+
+    private static Bitmap CreateHelpPlaybackIcon()
+    {
+        var bmp = new Bitmap(18, 18);
+        using Graphics g = Graphics.FromImage(bmp);
+        g.Clear(Color.Transparent);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var fill = new SolidBrush(Color.FromArgb(230, 230, 230));
+        DrawingPoint[] triangle =
+        [
+            new DrawingPoint(5, 3),
+            new DrawingPoint(14, 9),
+            new DrawingPoint(5, 15)
+        ];
+        g.FillPolygon(fill, triangle);
+        return bmp;
+    }
+
+    private static Bitmap CreateHelpTimelineIcon()
+    {
+        var bmp = new Bitmap(18, 18);
+        using Graphics g = Graphics.FromImage(bmp);
+        g.Clear(Color.Transparent);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var linePen = new Pen(Color.FromArgb(175, 175, 175), 1.5f);
+        using var playheadPen = new Pen(Color.FromArgb(80, 160, 255), 1.8f);
+        using var playheadBrush = new SolidBrush(Color.FromArgb(80, 160, 255));
+        g.DrawLine(linePen, 2, 12, 16, 12);
+        g.DrawLine(playheadPen, 9, 2, 9, 15);
+        DrawingPoint[] handle =
+        [
+            new DrawingPoint(6, 2),
+            new DrawingPoint(12, 2),
+            new DrawingPoint(9, 6)
+        ];
+        g.FillPolygon(playheadBrush, handle);
+        return bmp;
+    }
+
+    private static Bitmap CreateHelpMarkersIcon()
+    {
+        var bmp = new Bitmap(18, 18);
+        using Graphics g = Graphics.FromImage(bmp);
+        g.Clear(Color.Transparent);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var lanePen = new Pen(Color.FromArgb(130, 130, 130), 1.2f);
+        using var markerBrush = new SolidBrush(Color.FromArgb(255, 208, 64));
+        g.DrawLine(lanePen, 2, 13, 16, 13);
+        DrawingPoint[] leftMarker =
+        [
+            new DrawingPoint(5, 13),
+            new DrawingPoint(2, 8),
+            new DrawingPoint(8, 8)
+        ];
+        DrawingPoint[] rightMarker =
+        [
+            new DrawingPoint(13, 13),
+            new DrawingPoint(10, 8),
+            new DrawingPoint(16, 8)
+        ];
+        g.FillPolygon(markerBrush, leftMarker);
+        g.FillPolygon(markerBrush, rightMarker);
+        return bmp;
+    }
+
+    private static Bitmap CreateHelpKeyboardIcon()
+    {
+        var bmp = new Bitmap(18, 18);
+        using Graphics g = Graphics.FromImage(bmp);
+        g.Clear(Color.Transparent);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var keyPen = new Pen(Color.FromArgb(220, 220, 220), 1.2f);
+        using var textBrush = new SolidBrush(Color.FromArgb(220, 220, 220));
+        using (GraphicsPath key = CreateRoundedRectPath(new Rectangle(2, 3, 14, 12), 2))
+        {
+            g.DrawPath(keyPen, key);
+        }
+        using var font = new Font("Segoe UI Semibold", 8f, FontStyle.Bold, GraphicsUnit.Pixel);
+        g.DrawString("F1", font, textBrush, new RectangleF(3, 5, 12, 8), new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
+        return bmp;
+    }
+
+    private Button CreateLayoutButton(DrawingPoint location, Action onClick)
+    {
+        var button = new Button
+        {
+            Location = location,
+            Size = new DrawingSize(38, 28),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.Transparent,
+            ForeColor = Color.White,
+            ImageAlign = ContentAlignment.MiddleCenter,
+            Text = string.Empty,
+            TabStop = false
+        };
+        button.FlatAppearance.BorderSize = 0;
+        button.FlatAppearance.MouseDownBackColor = Color.Transparent;
+        button.FlatAppearance.MouseOverBackColor = Color.Transparent;
+        button.UseVisualStyleBackColor = false;
+        button.Click += (_, _) => onClick();
+        return button;
+    }
+
+    private static Bitmap CreateLayoutIcon(bool stacked, Color strokeColor)
+    {
+        var bmp = new Bitmap(18, 18);
+        using Graphics g = Graphics.FromImage(bmp);
+        g.Clear(Color.Transparent);
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using var borderPen = new Pen(strokeColor, 1.6f);
+        if (stacked)
+        {
+            g.DrawRectangle(borderPen, 2, 2, 14, 6);
+            g.DrawRectangle(borderPen, 2, 10, 14, 6);
+        }
+        else
+        {
+            g.DrawRectangle(borderPen, 2, 2, 6, 14);
+            g.DrawRectangle(borderPen, 10, 2, 6, 14);
+        }
+        return bmp;
+    }
+
+    private void UpdateLayoutButtonsState()
+    {
+        if (_layoutSideBySideButton is null || _layoutStackedButton is null)
+        {
+            return;
+        }
+
+        bool isSideBySide = layoutComboBox.SelectedIndex == 0;
+        _layoutSideBySideButton.Image = isSideBySide ? _layoutSideBySideActiveIcon : _layoutSideBySideInactiveIcon;
+        _layoutStackedButton.Image = isSideBySide ? _layoutStackedInactiveIcon : _layoutStackedActiveIcon;
+    }
+
     private void SeekToFrame(VideoTrack track, int frameIndex)
     {
         if (!track.IsLoaded)
@@ -815,7 +1392,7 @@ public partial class Form1 : Form
         RenderTrack(track, GetSnappedFrame(track, frameIndex), updateMasterTimeline: false);
     }
 
-    private void RenderTrack(VideoTrack track, int requestedFrameIndex, bool updateMasterTimeline = false)
+    private void RenderTrack(VideoTrack track, int requestedFrameIndex, bool updateMasterTimeline = false, bool lightweight = false)
     {
         if (!track.IsLoaded)
         {
@@ -830,7 +1407,7 @@ public partial class Form1 : Form
             if (frame is null || frame.Empty())
             {
                 AppLog.WriteError($"RenderTrack failed for {track.Name} at frame {safeFrameIndex}.");
-                ClearTrackPreview(track);
+                ClearTrackPreview(track, lightweight);
                 return;
             }
 
@@ -860,16 +1437,19 @@ public partial class Form1 : Form
         }
 
         track.ShowStillFrame();
-        ApplyScale(track);
-        UpdateTrackInfo(track);
-        if (updateMasterTimeline)
+        if (!lightweight)
         {
-            UpdateMasterTimelineAfterTrackRender(track);
-        }
+            ApplyScale(track);
+            UpdateTrackInfo(track);
+            if (updateMasterTimeline)
+            {
+                UpdateMasterTimelineAfterTrackRender(track);
+            }
 
-        track.MarkerPanel.Invalidate();
-        UpdatePlaybackStatus();
-        UpdateAlignmentPreview();
+            track.MarkerPanel.Invalidate();
+            UpdatePlaybackStatus();
+            UpdateAlignmentPreview();
+        }
     }
 
     private void layoutComboBox_SelectedIndexChanged(object sender, EventArgs e) => UpdateLayoutMode();
@@ -885,11 +1465,13 @@ public partial class Form1 : Form
             ApplyPlaybackRate(_rightTrack);
         }
 
+        EnsureAllPreviewScrollStates();
         UpdatePlaybackStatus();
     }
 
     private void UpdateLayoutMode()
     {
+        UpdateLayoutButtonsState();
         bool horizontal = layoutComboBox.SelectedIndex == 0;
         videosTableLayout.SuspendLayout();
         if (_sharedCommentsPanel is not null && !videosTableLayout.Controls.Contains(_sharedCommentsPanel))
@@ -944,18 +1526,14 @@ public partial class Form1 : Form
 
     private void UpdateCommentsSidebarButtonText()
     {
-        if (_toggleCommentsSidebarButton is null)
+        if (_toggleCommentsTopBarButton is null)
         {
             return;
         }
 
-        _toggleCommentsSidebarButton.Text = _isCommentsSidebarCollapsed ? ">" : "<";
-        _toggleCommentsSidebarButton.AccessibleName = _isCommentsSidebarCollapsed ? "Show Comments" : "Hide Comments";
-        if (_expandCommentsEdgeButton is not null)
-        {
-            _expandCommentsEdgeButton.Visible = _isCommentsSidebarCollapsed;
-            _expandCommentsEdgeButton.BringToFront();
-        }
+        _toggleCommentsTopBarButton.AccessibleName = _isCommentsSidebarCollapsed ? "Show Comments" : "Hide Comments";
+        _toggleCommentsTopBarButton.Image = _isCommentsSidebarCollapsed ? _commentsInactiveIcon : _commentsActiveIcon;
+        _toggleCommentsTopBarButton.BringToFront();
     }
 
     private void UpdateVideoFit()
@@ -991,8 +1569,34 @@ public partial class Form1 : Form
         track.PictureBox.Size = new DrawingSize(
             Math.Max(1, (int)Math.Round(sourceFrameSize.Width * appliedScale)),
             Math.Max(1, (int)Math.Round(sourceFrameSize.Height * appliedScale)));
-        track.ImagePanel.AutoScrollMinSize = track.PictureBox.Size;
+        UpdateTrackScrollState(track, availableWidth, availableHeight);
         UpdateTrackPreviewLayout(track);
+    }
+
+    private static void UpdateTrackScrollState(VideoTrack track, int viewportWidth, int viewportHeight)
+    {
+        int picW = track.PictureBox.Width;
+        int picH = track.PictureBox.Height;
+        bool needsH = picW > viewportWidth;
+        bool needsV = picH > viewportHeight;
+
+        // Account for scrollbar cross-impact so we don't oscillate into phantom bars.
+        if (needsV && !needsH)
+        {
+            int reducedWidth = Math.Max(1, viewportWidth - SystemInformation.VerticalScrollBarWidth);
+            needsH = picW > reducedWidth;
+        }
+        if (needsH && !needsV)
+        {
+            int reducedHeight = Math.Max(1, viewportHeight - SystemInformation.HorizontalScrollBarHeight);
+            needsV = picH > reducedHeight;
+        }
+
+        track.ImagePanel.AutoScrollMinSize = new DrawingSize(needsH ? picW : 0, needsV ? picH : 0);
+        if (!needsH && !needsV)
+        {
+            track.ImagePanel.AutoScrollPosition = new DrawingPoint(0, 0);
+        }
     }
 
     private static void UpdateTrackPreviewLayout(VideoTrack track)
@@ -1004,11 +1608,13 @@ public partial class Form1 : Form
 
         int viewportWidth = Math.Max(1, track.ImagePanel.ClientSize.Width - track.ImagePanel.Padding.Horizontal);
         int viewportHeight = Math.Max(1, track.ImagePanel.ClientSize.Height - track.ImagePanel.Padding.Vertical);
+        bool canScrollX = track.ImagePanel.AutoScrollMinSize.Width > 0;
+        bool canScrollY = track.ImagePanel.AutoScrollMinSize.Height > 0;
         DrawingPoint scrollOffset = track.ImagePanel.AutoScrollPosition;
-        int x = track.PictureBox.Width <= viewportWidth
+        int x = !canScrollX
             ? track.ImagePanel.Padding.Left + ((viewportWidth - track.PictureBox.Width) / 2)
             : track.ImagePanel.Padding.Left + scrollOffset.X;
-        int y = track.PictureBox.Height <= viewportHeight
+        int y = !canScrollY
             ? track.ImagePanel.Padding.Top + ((viewportHeight - track.PictureBox.Height) / 2)
             : track.ImagePanel.Padding.Top + scrollOffset.Y;
         track.PictureBox.Location = new DrawingPoint(x, y);
@@ -1122,6 +1728,12 @@ public partial class Form1 : Form
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        if (keyData == Keys.F1)
+        {
+            ShowHelpOverlay();
+            return true;
+        }
+
         if (keyData == Keys.F3)
         {
             _showTimelineDebug = !_showTimelineDebug;
@@ -1450,6 +2062,8 @@ public partial class Form1 : Form
 
     private void UpdatePlaybackStatus()
     {
+        EnsureAllPreviewScrollStates();
+
         string leftStatus = _leftTrack.IsTemporaryWindowSource
             ? "A live window"
             : _leftTrack.IsLoaded
@@ -1462,7 +2076,7 @@ public partial class Form1 : Form
             : "B not loaded";
         string playback = _isPlaying ? "Playing" : "Paused";
         int speedPercent = (int)Math.Round(_playbackSpeedMultiplier * 100f);
-        playbackStatusLabel.Text = $"{playback} {speedPercent}% | {leftStatus} | {rightStatus}";
+        playbackStatusLabel.Text = $"{playback} {speedPercent}% speed | {leftStatus} | {rightStatus}";
         if (_showTimelineDebug)
         {
             int global = masterTimeline.Value;
@@ -1472,6 +2086,25 @@ public partial class Form1 : Form
             string rightRange = _rightTrack.IsLoaded ? (rightLocal >= 0 && rightLocal <= _rightTrack.LastFrameIndex ? "in" : "out") : "-";
             playbackStatusLabel.Text += $" | dbg g:{global} A:{leftLocal}({leftRange}) B:{rightLocal}({rightRange})";
         }
+    }
+
+    private void EnsureAllPreviewScrollStates()
+    {
+        EnsureTrackPreviewScrollState(_leftTrack);
+        EnsureTrackPreviewScrollState(_rightTrack);
+    }
+
+    private static void EnsureTrackPreviewScrollState(VideoTrack track)
+    {
+        if (track.IsPlaybackVisible)
+        {
+            return;
+        }
+
+        int availableWidth = Math.Max(1, track.ImagePanel.ClientSize.Width - track.ImagePanel.Padding.Horizontal);
+        int availableHeight = Math.Max(1, track.ImagePanel.ClientSize.Height - track.ImagePanel.Padding.Vertical);
+        UpdateTrackScrollState(track, availableWidth, availableHeight);
+        UpdateTrackPreviewLayout(track);
     }
 
     private void UpdateAlignmentPreview()
@@ -1583,6 +2216,8 @@ public partial class Form1 : Form
         var comment = new SharedComment(_nextSharedCommentId++, masterTimeline.Value, commentText.Trim(), DateTime.Now);
         _sharedComments.Add(comment);
         _sharedComments.Sort((a, b) => a.FrameIndex.CompareTo(b.FrameIndex));
+        _isCommentsSidebarCollapsed = false;
+        UpdateLayoutMode();
         SelectSharedComment(comment.Id, moveTimelineToComment: false);
         UpdateSharedCommentsUi();
         SaveSession();
@@ -1654,35 +2289,29 @@ public partial class Form1 : Form
 
     private void UpdateSharedCommentsUi()
     {
-        if (_sharedCommentsListView is null)
+        if (_sharedCommentsListBox is null)
         {
             return;
         }
 
         _isUpdatingSharedCommentsList = true;
-        _sharedCommentsListView.BeginUpdate();
+        _sharedCommentsListBox.BeginUpdate();
         try
         {
-            _sharedCommentsListView.Items.Clear();
+            _sharedCommentsListBox.Items.Clear();
             foreach (SharedComment comment in _sharedComments)
             {
-                var item = new ListViewItem(FrameToSharedTimestamp(comment.FrameIndex))
-                {
-                    Tag = comment
-                };
-                item.SubItems.Add(comment.Text);
-                _sharedCommentsListView.Items.Add(item);
+                _sharedCommentsListBox.Items.Add(comment);
             }
 
             if (_selectedSharedCommentId is int selectedId)
             {
-                foreach (ListViewItem item in _sharedCommentsListView.Items)
+                for (int i = 0; i < _sharedCommentsListBox.Items.Count; i++)
                 {
-                    if (item.Tag is SharedComment comment && comment.Id == selectedId)
+                    if (_sharedCommentsListBox.Items[i] is SharedComment comment && comment.Id == selectedId)
                     {
-                        item.Selected = true;
-                        item.Focused = true;
-                        item.EnsureVisible();
+                        _sharedCommentsListBox.SelectedIndex = i;
+                        _sharedCommentsListBox.TopIndex = Math.Max(0, i - 2);
                         break;
                     }
                 }
@@ -1690,7 +2319,7 @@ public partial class Form1 : Form
         }
         finally
         {
-            _sharedCommentsListView.EndUpdate();
+            _sharedCommentsListBox.EndUpdate();
             _isUpdatingSharedCommentsList = false;
         }
         _sharedCommentMarkerPanel?.Invalidate();
@@ -1817,6 +2446,8 @@ public partial class Form1 : Form
         using var clipOutlinePen = new Pen(Color.FromArgb(80, 170, 220), 1f);
         using var markerBrush = new SolidBrush(Color.FromArgb(255, 208, 64));
         using var markerOutlinePen = new Pen(Color.FromArgb(126, 96, 18), 1f);
+        using var selectedMarkerBrush = new SolidBrush(Color.FromArgb(255, 154, 52));
+        using var selectedMarkerOutlinePen = new Pen(Color.FromArgb(255, 226, 172), 1.5f);
         using var commentBrush = new SolidBrush(Color.FromArgb(115, 196, 255));
         using var selectedCommentBrush = new SolidBrush(Color.FromArgb(255, 126, 198));
         using var commentOutlinePen = new Pen(Color.FromArgb(42, 70, 92), 1f);
@@ -1828,10 +2459,10 @@ public partial class Form1 : Form
         DrawTimeRuler(graphics, width, rulerPen, textBrush, font);
 
         DrawTimelineLane(graphics, ClipTimelineHeaderHeight, laneBrush, laneOutlinePen);
-        DrawTrackClip(graphics, _leftTrack, ClipTimelineHeaderHeight, clipBrush, clipOutlinePen, markerBrush, markerOutlinePen, textBrush, font);
+        DrawTrackClip(graphics, _leftTrack, ClipTimelineHeaderHeight, clipBrush, clipOutlinePen, markerBrush, markerOutlinePen, selectedMarkerBrush, selectedMarkerOutlinePen, textBrush, font);
         int secondTrackY = ClipTimelineHeaderHeight + ClipTimelineTrackHeight + ClipTimelineTrackGap;
         DrawTimelineLane(graphics, secondTrackY, laneBrush, laneOutlinePen);
-        DrawTrackClip(graphics, _rightTrack, secondTrackY, clipBrush, clipOutlinePen, markerBrush, markerOutlinePen, textBrush, font);
+        DrawTrackClip(graphics, _rightTrack, secondTrackY, clipBrush, clipOutlinePen, markerBrush, markerOutlinePen, selectedMarkerBrush, selectedMarkerOutlinePen, textBrush, font);
 
         DrawSharedCommentsOnTimeline(graphics, commentBrush, selectedCommentBrush, commentOutlinePen);
 
@@ -1935,6 +2566,8 @@ public partial class Form1 : Form
         Pen clipOutlinePen,
         Brush markerBrush,
         Pen markerOutlinePen,
+        Brush selectedMarkerBrush,
+        Pen selectedMarkerOutlinePen,
         Brush textBrush,
         Font font)
     {
@@ -1991,14 +2624,21 @@ public partial class Form1 : Form
                 continue;
             }
 
+            bool isSelected = track.SelectedMarker == marker;
+            bool isSnapPreview = _snapPreviewTrack == track && _snapPreviewMarker == marker;
+            bool emphasize = isSelected || isSnapPreview;
+            int halfWidth = emphasize ? 5 : 4;
+            int topY = y + (emphasize ? 3 : 4);
             DrawingPoint[] markerShape =
             [
                 new DrawingPoint(markerX, y + ClipTimelineTrackHeight - 2),
-                new DrawingPoint(markerX - 4, y + 4),
-                new DrawingPoint(markerX + 4, y + 4)
+                new DrawingPoint(markerX - halfWidth, topY),
+                new DrawingPoint(markerX + halfWidth, topY)
             ];
-            graphics.FillPolygon(markerBrush, markerShape);
-            graphics.DrawPolygon(markerOutlinePen, markerShape);
+            Brush fillBrush = emphasize ? selectedMarkerBrush : markerBrush;
+            Pen outlinePen = emphasize ? selectedMarkerOutlinePen : markerOutlinePen;
+            graphics.FillPolygon(fillBrush, markerShape);
+            graphics.DrawPolygon(outlinePen, markerShape);
         }
     }
 
@@ -2019,7 +2659,6 @@ public partial class Form1 : Form
         {
             _isDraggingPlayhead = true;
             _clipTimelineCanvas.Cursor = Cursors.SizeWE;
-            _lastPlayheadPreviewTick = 0;
             SetGlobalTimelineFrame(TimelineXToFrame(e.X));
             return;
         }
@@ -2029,14 +2668,27 @@ public partial class Form1 : Form
         {
             _dragStartMouseX = e.X;
             _dragStartTrackOffset = _draggingTimelineTrack.TimelineStartFrame;
+            ClearTrackDragSnap();
             SetActiveTrack(_draggingTimelineTrack);
             _clipTimelineCanvas.Cursor = Cursors.SizeWE;
-            _lastDragPreviewTick = 0;
             _clipTimelineCanvas?.Invalidate();
             return;
         }
 
+        // Avoid accidental playhead jumps when clicking inside timeline lanes.
+        int leftLaneY = ClipTimelineHeaderHeight;
+        int rightLaneY = ClipTimelineHeaderHeight + ClipTimelineTrackHeight + ClipTimelineTrackGap;
+        bool clickedTrackLane =
+            (e.Y >= leftLaneY && e.Y <= leftLaneY + ClipTimelineTrackHeight) ||
+            (e.Y >= rightLaneY && e.Y <= rightLaneY + ClipTimelineTrackHeight);
+        if (clickedTrackLane)
+        {
+            return;
+        }
+
         SetGlobalTimelineFrame(TimelineXToFrame(e.X));
+        _isDraggingPlayhead = true;
+        _clipTimelineCanvas.Cursor = Cursors.SizeWE;
     }
 
     private void ClipTimelineCanvas_MouseMove(object? sender, MouseEventArgs e)
@@ -2076,7 +2728,8 @@ public partial class Form1 : Form
         }
 
         int delta = TimelineXToFrame(e.X) - TimelineXToFrame(_dragStartMouseX);
-        int nextStart = Math.Max(0, _dragStartTrackOffset + delta);
+        int requestedStart = Math.Max(0, _dragStartTrackOffset + delta);
+        int nextStart = GetSnappedTimelineStartForTrackDrag(_draggingTimelineTrack, requestedStart);
         if (_draggingTimelineTrack.TimelineStartFrame == nextStart)
         {
             return;
@@ -2140,6 +2793,10 @@ public partial class Form1 : Form
 
     private bool TrySelectTrackMarkerAtPosition(DrawingPoint point)
     {
+        VideoTrack? bestTrack = null;
+        int bestMarker = -1;
+        int bestDistance = int.MaxValue;
+
         foreach (VideoTrack track in new[] { _leftTrack, _rightTrack })
         {
             if (!track.IsLoaded)
@@ -2150,26 +2807,49 @@ public partial class Form1 : Form
             int laneY = track == _leftTrack
                 ? ClipTimelineHeaderHeight
                 : ClipTimelineHeaderHeight + ClipTimelineTrackHeight + ClipTimelineTrackGap;
-            if (point.Y < laneY || point.Y > laneY + ClipTimelineTrackHeight)
+            int markerCenterY = laneY + 8;
+            int verticalDistance = Math.Abs(point.Y - markerCenterY);
+            if (verticalDistance > MarkerSelectionThresholdPixels)
             {
                 continue;
             }
 
             int clipX = FrameToTimelineX(track.TimelineStartFrame);
+            int clipWidth = Math.Max(40, FramesToPixels(track.FrameCount));
+            int clipRight = clipX + clipWidth;
             foreach (int marker in track.Markers)
             {
                 int markerX = clipX + FramesToPixels(marker);
-                if (Math.Abs(markerX - point.X) <= MarkerSelectionThresholdPixels)
+                if (markerX < clipX - MarkerSelectionThresholdPixels || markerX > clipRight + MarkerSelectionThresholdPixels)
                 {
-                    SetActiveTrack(track);
-                    track.SelectedMarker = marker;
-                    _clipTimelineCanvas?.Invalidate();
-                    return true;
+                    continue;
+                }
+
+                int horizontalDistance = Math.Abs(markerX - point.X);
+                if (horizontalDistance > MarkerSelectionThresholdPixels)
+                {
+                    continue;
+                }
+
+                int weightedDistance = horizontalDistance + (verticalDistance * 2);
+                if (weightedDistance < bestDistance)
+                {
+                    bestDistance = weightedDistance;
+                    bestTrack = track;
+                    bestMarker = marker;
                 }
             }
         }
 
-        return false;
+        if (bestTrack is null)
+        {
+            return false;
+        }
+
+        SetActiveTrack(bestTrack);
+        bestTrack.SelectedMarker = bestMarker;
+        _clipTimelineCanvas?.Invalidate();
+        return true;
     }
 
     private bool TrySelectSharedCommentAtPosition(DrawingPoint point)
@@ -2218,8 +2898,6 @@ public partial class Form1 : Form
 
         double fitZoom = GetMinimumTimelineZoom();
         _timelinePixelsPerFrame = fitZoom;
-        _timelineZoomInitialized = true;
-
         int targetWidth = Math.Max(1, _clipTimelineViewport.ClientSize.Width);
         _clipTimelineCanvas.Width = Math.Max(1, targetWidth);
         _clipTimelineCanvas.Height = ClipTimelineCanvasHeight - 2;
@@ -2245,22 +2923,22 @@ public partial class Form1 : Form
 
     private void SetGlobalTimelineFrameDuringDrag(int frameIndex)
     {
-        EnsureClipTimelineCanvasWidth();
-        int safeGlobal = Math.Clamp(frameIndex, 0, Math.Max(0, masterTimeline.Maximum));
-        UpdateMasterTimelineFromFrame(safeGlobal);
-
-        // Keep marker movement responsive while still providing live preview.
-        // We clear out-of-range tracks immediately and throttle expensive in-range frame decoding.
-        long now = Environment.TickCount64;
-        bool shouldRenderInRange = now - _lastPlayheadPreviewTick >= 33;
-        PreviewTrackDuringDrag(_leftTrack, safeGlobal, shouldRenderInRange);
-        PreviewTrackDuringDrag(_rightTrack, safeGlobal, shouldRenderInRange);
-        if (shouldRenderInRange)
+        int requestedGlobal = Math.Clamp(frameIndex, 0, Math.Max(0, masterTimeline.Maximum));
+        int snappedGlobal = requestedGlobal;
+        if (TryGetSnappedGlobalMarker(requestedGlobal, out VideoTrack? snappedTrack, out int snappedMarker, out int snappedGlobalMarkerFrame))
         {
-            _lastPlayheadPreviewTick = now;
+            _snapPreviewTrack = snappedTrack;
+            _snapPreviewMarker = snappedMarker;
+            snappedGlobal = snappedGlobalMarkerFrame;
+        }
+        else
+        {
+            ClearSnapPreview();
         }
 
-        _clipTimelineCanvas?.Invalidate();
+        UpdateMasterTimelineFromFrame(snappedGlobal);
+        // Marker-first scrubbing: move playhead immediately and defer frame rendering
+        // until mouse release for precise, low-latency positioning.
     }
 
     private void ApplyGlobalFrame(int frameIndex, bool isDrag)
@@ -2271,12 +2949,126 @@ public partial class Form1 : Form
             return;
         }
 
+        ClearSnapPreview();
         EnsureClipTimelineCanvasWidth();
         int safeGlobal = Math.Clamp(frameIndex, 0, Math.Max(0, masterTimeline.Maximum));
         UpdateMasterTimelineFromFrame(safeGlobal);
         RenderTrackForGlobalFrame(_leftTrack, safeGlobal);
         RenderTrackForGlobalFrame(_rightTrack, safeGlobal);
         _clipTimelineCanvas?.Invalidate();
+    }
+
+    private bool TryGetSnappedGlobalMarker(int requestedGlobalFrame, out VideoTrack? snappedTrack, out int snappedMarkerFrame, out int snappedGlobalFrame)
+    {
+        snappedTrack = null;
+        snappedMarkerFrame = -1;
+        snappedGlobalFrame = requestedGlobalFrame;
+
+        int requestedX = FrameToTimelineX(requestedGlobalFrame);
+        int bestDistance = int.MaxValue;
+
+        foreach (VideoTrack track in new[] { _leftTrack, _rightTrack })
+        {
+            if (!track.IsLoaded || track.IsTemporaryWindowSource || track.Markers.Count == 0)
+            {
+                continue;
+            }
+
+            foreach (int marker in track.Markers)
+            {
+                int globalMarkerFrame = track.TimelineStartFrame + marker;
+                int markerX = FrameToTimelineX(globalMarkerFrame);
+                int distance = Math.Abs(markerX - requestedX);
+                if (distance > GlobalPlayheadSnapThresholdPixels)
+                {
+                    continue;
+                }
+
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    snappedTrack = track;
+                    snappedMarkerFrame = marker;
+                    snappedGlobalFrame = globalMarkerFrame;
+                }
+            }
+        }
+
+        return snappedTrack is not null;
+    }
+
+    private void ClearSnapPreview()
+    {
+        _snapPreviewTrack = null;
+        _snapPreviewMarker = null;
+    }
+
+    private int GetSnappedTimelineStartForTrackDrag(VideoTrack draggingTrack, int requestedStartFrame)
+    {
+        VideoTrack otherTrack = draggingTrack == _leftTrack ? _rightTrack : _leftTrack;
+        if (!draggingTrack.IsLoaded || !otherTrack.IsLoaded || draggingTrack.Markers.Count == 0 || otherTrack.Markers.Count == 0)
+        {
+            ClearTrackDragSnap();
+            return requestedStartFrame;
+        }
+
+        double pixelsPerFrame = Math.Max(0.0001d, _timelinePixelsPerFrame);
+        int lockThresholdFrames = Math.Max(1, (int)Math.Round(TrackDragMarkerSnapThresholdPixels / pixelsPerFrame));
+        int releaseThresholdFrames = Math.Max(lockThresholdFrames + 1, (int)Math.Round(TrackDragMarkerSnapReleaseThresholdPixels / pixelsPerFrame));
+
+        if (_trackDragSnapOwnMarker is int lockedOwnMarker &&
+            _trackDragSnapTargetGlobalMarkerFrame is int lockedTargetGlobalFrame)
+        {
+            int lockedStart = Math.Max(0, lockedTargetGlobalFrame - lockedOwnMarker);
+            if (Math.Abs(requestedStartFrame - lockedStart) <= releaseThresholdFrames)
+            {
+                return lockedStart;
+            }
+
+            ClearTrackDragSnap();
+        }
+
+        int bestDistance = int.MaxValue;
+        int bestOwnMarker = -1;
+        int bestTargetGlobalFrame = -1;
+        int bestSnappedStart = requestedStartFrame;
+        foreach (int ownMarker in draggingTrack.Markers)
+        {
+            foreach (int otherMarker in otherTrack.Markers)
+            {
+                int targetGlobalFrame = otherTrack.TimelineStartFrame + otherMarker;
+                int snappedStart = targetGlobalFrame - ownMarker;
+                if (snappedStart < 0)
+                {
+                    continue;
+                }
+
+                int distance = Math.Abs(requestedStartFrame - snappedStart);
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    bestOwnMarker = ownMarker;
+                    bestTargetGlobalFrame = targetGlobalFrame;
+                    bestSnappedStart = snappedStart;
+                }
+            }
+        }
+
+        if (bestDistance <= lockThresholdFrames)
+        {
+            _trackDragSnapOwnMarker = bestOwnMarker;
+            _trackDragSnapTargetGlobalMarkerFrame = bestTargetGlobalFrame;
+            return bestSnappedStart;
+        }
+
+        ClearTrackDragSnap();
+        return requestedStartFrame;
+    }
+
+    private void ClearTrackDragSnap()
+    {
+        _trackDragSnapOwnMarker = null;
+        _trackDragSnapTargetGlobalMarkerFrame = null;
     }
 
     private void PreviewTrackDuringDrag(VideoTrack track, int globalFrame, bool shouldRenderInRange)
@@ -2295,7 +3087,7 @@ public partial class Form1 : Form
 
         if (shouldRenderInRange)
         {
-            RenderTrack(track, localFrame, updateMasterTimeline: false);
+            RenderTrack(track, localFrame, updateMasterTimeline: false, lightweight: true);
         }
     }
 
@@ -2316,8 +3108,13 @@ public partial class Form1 : Form
         RenderTrack(track, localFrame, updateMasterTimeline: false);
     }
 
-    private void ClearTrackPreview(VideoTrack track)
+    private void ClearTrackPreview(VideoTrack track, bool lightweight = false)
     {
+        if (lightweight && track.PictureBox.Image is null)
+        {
+            return;
+        }
+
         if (track.PictureBox.Image is Bitmap previousBitmap)
         {
             track.PictureBox.Image = null;
@@ -2325,9 +3122,12 @@ public partial class Form1 : Form
         }
 
         track.ShowStillFrame();
-        ApplyScale(track);
-        UpdatePlaybackStatus();
-        UpdateAlignmentPreview();
+        if (!lightweight)
+        {
+            ApplyScale(track);
+            UpdatePlaybackStatus();
+            UpdateAlignmentPreview();
+        }
     }
 
     private int FrameToTimelineX(int frame)

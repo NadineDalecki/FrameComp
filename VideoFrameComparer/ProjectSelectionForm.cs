@@ -1,3 +1,6 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
+
 namespace VideoFrameComparer;
 
 internal sealed class ProjectSelectionForm : Form
@@ -14,9 +17,11 @@ internal sealed class ProjectSelectionForm : Form
 
     private readonly ListBox _projectListBox;
     private readonly Button _openSelectedButton;
-    private readonly Button _openLastButton;
+    private readonly Button _deleteProjectButton;
     private readonly Button _newProjectButton;
+    private readonly Button _renameProjectButton;
     private readonly Label _infoLabel;
+    private readonly ToolTip _toolTip = new ToolTip();
 
     public ProjectSelectionForm()
     {
@@ -53,14 +58,7 @@ internal sealed class ProjectSelectionForm : Form
             Dock = DockStyle.Bottom,
             Height = 56,
             Padding = new Padding(16, 8, 16, 8),
-            FlowDirection = FlowDirection.RightToLeft
-        };
-
-        var cancelButton = new Button
-        {
-            Text = "Cancel",
-            AutoSize = true,
-            DialogResult = DialogResult.Cancel
+            FlowDirection = FlowDirection.LeftToRight
         };
 
         _openSelectedButton = new Button
@@ -71,13 +69,17 @@ internal sealed class ProjectSelectionForm : Form
         StyleButton(_openSelectedButton, isPrimary: true);
         _openSelectedButton.Click += (_, _) => OpenSelectedProject();
 
-        _openLastButton = new Button
+        _deleteProjectButton = new Button
         {
-            Text = "Open Last",
+            Text = "Delete",
             AutoSize = true
         };
-        StyleButton(_openLastButton, isPrimary: false);
-        _openLastButton.Click += (_, _) => OpenLastProject();
+        StyleButton(_deleteProjectButton, isPrimary: false);
+        StyleIconButton(_deleteProjectButton, CreateTrashIcon());
+        _deleteProjectButton.AccessibleName = "Delete Project";
+        _deleteProjectButton.FlatAppearance.MouseOverBackColor = Color.FromArgb(168, 54, 54);
+        _deleteProjectButton.FlatAppearance.MouseDownBackColor = Color.FromArgb(138, 40, 40);
+        _deleteProjectButton.Click += (_, _) => DeleteSelectedProject();
 
         _newProjectButton = new Button
         {
@@ -85,14 +87,24 @@ internal sealed class ProjectSelectionForm : Form
             AutoSize = true
         };
         StyleButton(_newProjectButton, isPrimary: false);
+        StyleIconButton(_newProjectButton, CreatePlusIcon());
+        _newProjectButton.AccessibleName = "New Project";
         _newProjectButton.Click += (_, _) => CreateProject();
 
-        StyleButton(cancelButton, isPrimary: false);
+        _renameProjectButton = new Button
+        {
+            Text = "Rename",
+            AutoSize = true
+        };
+        StyleButton(_renameProjectButton, isPrimary: false);
+        StyleIconButton(_renameProjectButton, CreatePencilIcon());
+        _renameProjectButton.AccessibleName = "Rename Project";
+        _renameProjectButton.Click += (_, _) => RenameSelectedProject();
 
-        buttonPanel.Controls.Add(cancelButton);
         buttonPanel.Controls.Add(_openSelectedButton);
-        buttonPanel.Controls.Add(_openLastButton);
         buttonPanel.Controls.Add(_newProjectButton);
+        buttonPanel.Controls.Add(_renameProjectButton);
+        buttonPanel.Controls.Add(_deleteProjectButton);
 
         var listHost = new Panel
         {
@@ -104,6 +116,10 @@ internal sealed class ProjectSelectionForm : Form
         Controls.Add(listHost);
         Controls.Add(buttonPanel);
         Controls.Add(_infoLabel);
+
+        _toolTip.SetToolTip(_newProjectButton, "New project");
+        _toolTip.SetToolTip(_renameProjectButton, "Rename selected project");
+        _toolTip.SetToolTip(_deleteProjectButton, "Delete selected project");
 
         RefreshProjects();
     }
@@ -145,7 +161,8 @@ internal sealed class ProjectSelectionForm : Form
     private void UpdateButtons()
     {
         _openSelectedButton.Enabled = _projectListBox.SelectedItem is ProjectListItem;
-        _openLastButton.Enabled = TryReadLastProjectPath() is not null;
+        _renameProjectButton.Enabled = _projectListBox.SelectedItem is ProjectListItem;
+        _deleteProjectButton.Enabled = _projectListBox.SelectedItem is ProjectListItem;
     }
 
     private void OpenSelectedProject()
@@ -158,16 +175,51 @@ internal sealed class ProjectSelectionForm : Form
         CompleteSelection(item.FullPath);
     }
 
-    private void OpenLastProject()
+    private void DeleteSelectedProject()
     {
-        string? lastProjectPath = TryReadLastProjectPath();
-        if (lastProjectPath is null || !File.Exists(lastProjectPath))
+        if (_projectListBox.SelectedItem is not ProjectListItem item)
         {
-            RefreshProjects();
             return;
         }
 
-        CompleteSelection(lastProjectPath);
+        string projectName = Path.GetFileNameWithoutExtension(item.FullPath);
+        DialogResult confirm = MessageBox.Show(
+            this,
+            $"Delete project '{projectName}'?\n\nThis will permanently remove the project file:\n{item.FullPath}\n\nThis cannot be undone.",
+            "Delete Project",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2);
+        if (confirm != DialogResult.Yes)
+        {
+            return;
+        }
+
+        try
+        {
+            if (File.Exists(item.FullPath))
+            {
+                File.Delete(item.FullPath);
+            }
+
+            string? lastProjectPath = TryReadLastProjectPath();
+            if (lastProjectPath is not null &&
+                string.Equals(lastProjectPath, item.FullPath, StringComparison.OrdinalIgnoreCase))
+            {
+                File.WriteAllText(LastProjectPathFile, string.Empty);
+            }
+
+            RefreshProjects();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                this,
+                $"Could not delete the project.\n\n{ex.Message}",
+                "Delete Failed",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
     }
 
     private void CreateProject()
@@ -188,6 +240,102 @@ internal sealed class ProjectSelectionForm : Form
         string projectPath = GetUniqueProjectPath(fileName);
         File.WriteAllText(projectPath, "{\n  \"ProjectName\": \"" + EscapeJson(prompt.ProjectName.Trim()) + "\"\n}");
         CompleteSelection(projectPath);
+    }
+
+    private void RenameSelectedProject()
+    {
+        if (_projectListBox.SelectedItem is not ProjectListItem item)
+        {
+            return;
+        }
+
+        string currentDisplayName = Path.GetFileNameWithoutExtension(item.FullPath);
+        using var prompt = new ProjectNamePromptForm(title: "Rename Project", initialName: currentDisplayName, submitLabel: "Rename");
+        if (prompt.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(prompt.ProjectName))
+        {
+            return;
+        }
+
+        string requestedName = prompt.ProjectName.Trim();
+        string fileName = SanitizeFileName(requestedName);
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            MessageBox.Show(this, "Please choose a project name with at least one letter or number.", "Invalid project name", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        string currentPath = item.FullPath;
+        string currentBaseName = Path.GetFileNameWithoutExtension(currentPath);
+        string targetPath = string.Equals(fileName, currentBaseName, StringComparison.OrdinalIgnoreCase)
+            ? currentPath
+            : GetUniqueProjectPath(fileName);
+
+        try
+        {
+            if (!string.Equals(currentPath, targetPath, StringComparison.OrdinalIgnoreCase))
+            {
+                File.Move(currentPath, targetPath);
+            }
+
+            TryUpdateProjectNameInFile(targetPath, requestedName);
+
+            string? lastProjectPath = TryReadLastProjectPath();
+            if (lastProjectPath is not null &&
+                string.Equals(lastProjectPath, currentPath, StringComparison.OrdinalIgnoreCase))
+            {
+                File.WriteAllText(LastProjectPathFile, targetPath);
+            }
+
+            RefreshProjects();
+            SelectProjectByPath(targetPath);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                this,
+                $"Could not rename the project.\n\n{ex.Message}",
+                "Rename Failed",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+    }
+
+    private void SelectProjectByPath(string fullPath)
+    {
+        for (int i = 0; i < _projectListBox.Items.Count; i++)
+        {
+            if (_projectListBox.Items[i] is ProjectListItem item &&
+                string.Equals(item.FullPath, fullPath, StringComparison.OrdinalIgnoreCase))
+            {
+                _projectListBox.SelectedIndex = i;
+                break;
+            }
+        }
+    }
+
+    private static void TryUpdateProjectNameInFile(string projectPath, string projectName)
+    {
+        try
+        {
+            if (!File.Exists(projectPath))
+            {
+                return;
+            }
+
+            string json = File.ReadAllText(projectPath);
+            JsonNode? root = JsonNode.Parse(json);
+            if (root is not JsonObject obj)
+            {
+                return;
+            }
+
+            obj["ProjectName"] = projectName;
+            File.WriteAllText(projectPath, obj.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch
+        {
+            // Best-effort metadata update only.
+        }
     }
 
     private void CompleteSelection(string projectPath)
@@ -260,6 +408,57 @@ internal sealed class ProjectSelectionForm : Form
         button.MinimumSize = new Size(104, 32);
     }
 
+    private static void StyleIconButton(Button button, Bitmap icon)
+    {
+        button.Text = string.Empty;
+        button.AutoSize = false;
+        button.Size = new Size(40, 32);
+        button.MinimumSize = new Size(40, 32);
+        button.Image = icon;
+        button.ImageAlign = ContentAlignment.MiddleCenter;
+    }
+
+    private static Bitmap CreatePlusIcon()
+    {
+        var bmp = new Bitmap(16, 16);
+        using Graphics g = Graphics.FromImage(bmp);
+        g.Clear(Color.Transparent);
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using var pen = new Pen(Color.White, 1.8f);
+        g.DrawLine(pen, 8, 3, 8, 13);
+        g.DrawLine(pen, 3, 8, 13, 8);
+        return bmp;
+    }
+
+    private static Bitmap CreateTrashIcon()
+    {
+        var bmp = new Bitmap(16, 16);
+        using Graphics g = Graphics.FromImage(bmp);
+        g.Clear(Color.Transparent);
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using var pen = new Pen(Color.White, 1.5f);
+        g.DrawRectangle(pen, 4, 5, 8, 8);
+        g.DrawLine(pen, 3, 5, 13, 5);
+        g.DrawLine(pen, 6, 3, 10, 3);
+        g.DrawLine(pen, 7, 7, 7, 11);
+        g.DrawLine(pen, 9, 7, 9, 11);
+        return bmp;
+    }
+
+    private static Bitmap CreatePencilIcon()
+    {
+        var bmp = new Bitmap(16, 16);
+        using Graphics g = Graphics.FromImage(bmp);
+        g.Clear(Color.Transparent);
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using var pen = new Pen(Color.White, 1.5f);
+        g.DrawLine(pen, 4, 12, 12, 4);
+        g.DrawLine(pen, 11, 3, 13, 5);
+        g.DrawLine(pen, 3, 13, 6, 12);
+        g.DrawLine(pen, 3, 13, 4, 10);
+        return bmp;
+    }
+
     private sealed record ProjectListItem(string FullPath)
     {
         public override string ToString() => Path.GetFileNameWithoutExtension(FullPath);
@@ -269,9 +468,9 @@ internal sealed class ProjectSelectionForm : Form
     {
         private readonly TextBox _nameTextBox;
 
-        public ProjectNamePromptForm()
+        public ProjectNamePromptForm(string title = "New Project", string initialName = "", string submitLabel = "Create")
         {
-            Text = "New Project";
+            Text = title;
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
@@ -322,7 +521,7 @@ internal sealed class ProjectSelectionForm : Form
 
             var createButton = new Button
             {
-                Text = "Create",
+                Text = submitLabel,
                 AutoSize = true
             };
             StyleButton(createButton, isPrimary: true);
@@ -347,6 +546,8 @@ internal sealed class ProjectSelectionForm : Form
 
             AcceptButton = createButton;
             CancelButton = cancelButton;
+            _nameTextBox.Text = initialName;
+            _nameTextBox.SelectAll();
         }
 
         public string? ProjectName { get; private set; }
