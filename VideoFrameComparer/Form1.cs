@@ -103,6 +103,11 @@ public partial class Form1 : Form
     private Image? _layoutSideBySideInactiveIcon;
     private Button? _helpTopBarButton;
     private Image? _helpIcon;
+    private Button? _diagnosticsTopBarButton;
+    private Image? _diagnosticsIcon;
+    private Panel? _diagnosticsPanel;
+    private Label? _diagnosticsLabel;
+    private Button? _copyDiagnosticsButton;
     private readonly ToolTip _uiToolTip = new ToolTip();
     private Panel? _transportHostPanel;
     private Panel? _transportLeftPanel;
@@ -112,6 +117,12 @@ public partial class Form1 : Form
     private Button? _saveTrimmedVideosTopBarButton;
     private Button? _saveCombinedVideoTopBarButton;
     private bool _isSavingTrimmedVideos;
+    private bool _isRepairingPreviewFrames;
+    private string _diagnosticsFfmpegStatus = "Not checked";
+    private string _diagnosticsInstallStatus = "Not run";
+    private string _diagnosticsLastExportStatus = "None";
+    private string _diagnosticsLastError = "None";
+    private string _diagnosticsCopyStatus = string.Empty;
 
     public Form1(string projectFilePath)
     {
@@ -192,6 +203,7 @@ public partial class Form1 : Form
         LayoutTopBarButtons();
         LayoutTopBarControls();
         InitializeHelpUi();
+        InitializeDiagnosticsUi();
         InitializeTrimTopBarButtons();
         ConfigureTooltips();
         UpdateTrimActionButtonsState();
@@ -221,6 +233,7 @@ public partial class Form1 : Form
         DisposeImage(ref _commentsActiveIcon);
         DisposeImage(ref _commentsInactiveIcon);
         DisposeImage(ref _helpIcon);
+        DisposeImage(ref _diagnosticsIcon);
     }
 
     private static void DisposeImage(ref Image? image)
@@ -453,13 +466,22 @@ public partial class Form1 : Form
         int y = 12;
         int gap = 6;
         int commentsX = Math.Max(0, topBarPanel.ClientSize.Width - _toggleCommentsTopBarButton.Width - rightMargin);
-        int helpX = Math.Max(0, commentsX - _helpTopBarButton.Width - gap);
+        int helpX = commentsX;
+        if (_diagnosticsTopBarButton is not null)
+        {
+            int diagnosticsX = Math.Max(0, commentsX - _diagnosticsTopBarButton.Width - gap);
+            _diagnosticsTopBarButton.Location = new DrawingPoint(diagnosticsX, y);
+            _diagnosticsTopBarButton.BringToFront();
+            helpX = diagnosticsX;
+        }
+        helpX = Math.Max(0, helpX - _helpTopBarButton.Width - gap);
         _helpTopBarButton.Location = new DrawingPoint(helpX, y);
         _toggleCommentsTopBarButton.Location = new DrawingPoint(
             commentsX,
             y);
         _helpTopBarButton.BringToFront();
         _toggleCommentsTopBarButton.BringToFront();
+        LayoutDiagnosticsPanel();
     }
 
     private void LayoutTopBarControls()
@@ -518,6 +540,27 @@ public partial class Form1 : Form
         return button;
     }
 
+    private void BeginExportOperation(int jobCount, string preparingStatus, out int restoreGlobalFrame, out TrimExportProgressForm progressForm)
+    {
+        StopPlayback();
+        restoreGlobalFrame = masterTimeline.Value;
+        progressForm = new TrimExportProgressForm(Math.Max(1, jobCount));
+        progressForm.Show(this);
+        progressForm.UpdateProgress(0, 0d, preparingStatus);
+        Application.DoEvents();
+        _isSavingTrimmedVideos = true;
+        UpdateTrimActionButtonsState();
+    }
+
+    private void EndExportOperation(int restoreGlobalFrame, TrimExportProgressForm progressForm)
+    {
+        _isSavingTrimmedVideos = false;
+        UpdateTrimActionButtonsState();
+        SetGlobalTimelineFrame(restoreGlobalFrame);
+        progressForm.Close();
+        progressForm.Dispose();
+    }
+
     private void SaveTrimmedVideosButton_Click(object? sender, EventArgs e)
     {
         if (_isSavingTrimmedVideos || !CanExportTrimRange())
@@ -526,6 +569,7 @@ public partial class Form1 : Form
         }
 
         bool hasFfmpeg = TryResolveFfmpegExecutable(out string? ffmpegExecutable);
+        RecordDiagnostics(ffmpegStatus: hasFfmpeg ? $"Available ({ffmpegExecutable})" : "Missing");
         if (!hasFfmpeg)
         {
             DialogResult installPrompt = MessageBox.Show(
@@ -543,6 +587,7 @@ public partial class Form1 : Form
                 if (TryInstallFfmpegForUser(out string installMessage))
                 {
                     hasFfmpeg = TryResolveFfmpegExecutable(out ffmpegExecutable);
+                    RecordDiagnostics(ffmpegStatus: hasFfmpeg ? $"Available ({ffmpegExecutable})" : "Missing");
                 }
 
                 if (!hasFfmpeg)
@@ -569,8 +614,6 @@ public partial class Form1 : Form
             return;
         }
 
-        StopPlayback();
-        int restoreGlobalFrame = masterTimeline.Value;
         int trimIn = GetGlobalTrimIn();
         int trimOut = GetGlobalTrimOut();
         var savedFiles = new List<string>();
@@ -596,13 +639,7 @@ public partial class Form1 : Form
             return;
         }
 
-        using var progressForm = new TrimExportProgressForm(plans.Count);
-        progressForm.Show(this);
-        progressForm.UpdateProgress(0, 0d, $"Preparing {plans.Count} export job(s)...");
-        Application.DoEvents();
-
-        _isSavingTrimmedVideos = true;
-        UpdateTrimActionButtonsState();
+        BeginExportOperation(plans.Count, $"Preparing {plans.Count} export job(s)...", out int restoreGlobalFrame, out TrimExportProgressForm progressForm);
         try
         {
             for (int planIndex = 0; planIndex < plans.Count; planIndex++)
@@ -666,10 +703,7 @@ public partial class Form1 : Form
         }
         finally
         {
-            _isSavingTrimmedVideos = false;
-            UpdateTrimActionButtonsState();
-            SetGlobalTimelineFrame(restoreGlobalFrame);
-            progressForm.Close();
+            EndExportOperation(restoreGlobalFrame, progressForm);
         }
 
         if (savedFiles.Count > 0)
@@ -678,6 +712,7 @@ public partial class Form1 : Form
             string skipped = skippedReasons.Count > 0
                 ? $"\n\nSkipped:\n{string.Join("\n", skippedReasons)}"
                 : string.Empty;
+            RecordDiagnostics(exportStatus: $"Trim export OK ({savedFiles.Count} files)", error: skippedReasons.Count > 0 ? skippedReasons[0] : "None");
             MessageBox.Show(this, success + skipped, "Trim Saved", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -685,6 +720,7 @@ public partial class Form1 : Form
         string failure = skippedReasons.Count > 0
             ? string.Join("\n", skippedReasons)
             : "No exportable track was found for the selected range.";
+        RecordDiagnostics(exportStatus: "Trim export failed", error: failure.Split('\n').FirstOrDefault() ?? failure);
         MessageBox.Show(this, failure, "Nothing Saved", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 
@@ -719,15 +755,7 @@ public partial class Form1 : Form
             return;
         }
 
-        StopPlayback();
-        int restoreGlobalFrame = masterTimeline.Value;
-        using var progressForm = new TrimExportProgressForm(1);
-        progressForm.Show(this);
-        progressForm.UpdateProgress(0, 0d, "Preparing combined export...");
-        Application.DoEvents();
-
-        _isSavingTrimmedVideos = true;
-        UpdateTrimActionButtonsState();
+        BeginExportOperation(1, "Preparing combined export...", out int restoreGlobalFrame, out TrimExportProgressForm progressForm);
         try
         {
             bool isSideBySide = layoutComboBox.SelectedIndex == 0;
@@ -745,19 +773,18 @@ public partial class Form1 : Form
             {
                 progressForm.UpdateProgress(0, 1d, "Combined video saved.");
                 Application.DoEvents();
+                RecordDiagnostics(exportStatus: $"Combined export OK ({Path.GetFileName(saveDialog.FileName)})", error: "None");
                 MessageBox.Show(this, $"Saved combined video:\n{Path.GetFileName(saveDialog.FileName)}", "Combined Saved", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             else
             {
+                RecordDiagnostics(exportStatus: "Combined export failed", error: message);
                 MessageBox.Show(this, message, "Combined Export Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
         finally
         {
-            _isSavingTrimmedVideos = false;
-            UpdateTrimActionButtonsState();
-            SetGlobalTimelineFrame(restoreGlobalFrame);
-            progressForm.Close();
+            EndExportOperation(restoreGlobalFrame, progressForm);
         }
     }
 
@@ -946,6 +973,7 @@ public partial class Form1 : Form
     private bool TryInstallFfmpegForUser(out string message)
     {
         message = "FFmpeg installation did not complete.";
+        RecordDiagnostics(installStatus: "Running...", error: "None");
         using var installForm = new FfmpegInstallProgressForm();
         installForm.Show(this);
         installForm.UpdateStatus("Starting FFmpeg installation...");
@@ -971,6 +999,7 @@ public partial class Form1 : Form
                     if (run.ExitCode == 0 && !run.TimedOut)
                     {
                         message = "FFmpeg installed successfully.";
+                        RecordDiagnostics(installStatus: "Success");
                         installForm.UpdateStatus("FFmpeg installed successfully.");
                         Application.DoEvents();
                         return true;
@@ -1009,6 +1038,7 @@ public partial class Form1 : Form
                 ? "\n\nDetails:\n" + string.Join("\n", details)
                 : string.Empty;
             message = "Automatic install failed. You can continue with Accurate mode, or install ffmpeg manually later." + detailText;
+            RecordDiagnostics(installStatus: "Failed", error: details.Count > 0 ? details[0] : "Install failed");
             installForm.UpdateStatus("FFmpeg installation failed.");
             Application.DoEvents();
             return false;
@@ -1091,10 +1121,12 @@ public partial class Form1 : Form
             if (TryProbeFfmpeg(candidate))
             {
                 executablePath = candidate;
+                RecordDiagnostics(ffmpegStatus: $"Available ({candidate})");
                 return true;
             }
         }
 
+        RecordDiagnostics(ffmpegStatus: "Missing");
         return false;
     }
 
@@ -2028,6 +2060,153 @@ public partial class Form1 : Form
         LayoutTopBarButtons();
     }
 
+    private void InitializeDiagnosticsUi()
+    {
+        _diagnosticsTopBarButton = CreateLayoutButton(
+            location: new DrawingPoint(0, 12),
+            onClick: ToggleDiagnosticsPanel);
+        _diagnosticsIcon = CreateDiagnosticsIcon(Color.FromArgb(238, 238, 238));
+        _diagnosticsTopBarButton.Image = _diagnosticsIcon;
+        _diagnosticsTopBarButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        topBarPanel.Controls.Add(_diagnosticsTopBarButton);
+        _diagnosticsTopBarButton.BringToFront();
+
+        _diagnosticsLabel = new Label
+        {
+            Dock = DockStyle.Fill,
+            ForeColor = Color.Gainsboro,
+            Font = new Font("Consolas", 8.5f, FontStyle.Regular),
+            Padding = new Padding(8),
+            BackColor = Color.FromArgb(28, 28, 28)
+        };
+        _copyDiagnosticsButton = new Button
+        {
+            Text = "Copy Diagnostics",
+            Dock = DockStyle.Bottom,
+            Height = 26,
+            FlatStyle = FlatStyle.Standard,
+            UseVisualStyleBackColor = true
+        };
+        _copyDiagnosticsButton.Click += (_, _) => CopyDiagnosticsToClipboard();
+        _diagnosticsPanel = new Panel
+        {
+            Visible = false,
+            BackColor = Color.FromArgb(28, 28, 28),
+            BorderStyle = BorderStyle.FixedSingle,
+            Size = new DrawingSize(420, 124),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right
+        };
+        _diagnosticsPanel.Controls.Add(_copyDiagnosticsButton);
+        _diagnosticsPanel.Controls.Add(_diagnosticsLabel);
+        Controls.Add(_diagnosticsPanel);
+        _diagnosticsPanel.BringToFront();
+        UpdateDiagnosticsPanelText();
+        LayoutDiagnosticsPanel();
+        Resize += (_, _) => LayoutDiagnosticsPanel();
+        LayoutTopBarButtons();
+    }
+
+    private void ToggleDiagnosticsPanel()
+    {
+        if (_diagnosticsPanel is null)
+        {
+            return;
+        }
+
+        _diagnosticsPanel.Visible = !_diagnosticsPanel.Visible;
+        if (_diagnosticsPanel.Visible)
+        {
+            UpdateDiagnosticsPanelText();
+            _diagnosticsPanel.BringToFront();
+        }
+    }
+
+    private void LayoutDiagnosticsPanel()
+    {
+        if (_diagnosticsPanel is null)
+        {
+            return;
+        }
+
+        int margin = 10;
+        int x = Math.Max(0, ClientSize.Width - _diagnosticsPanel.Width - margin);
+        int y = topBarPanel.Bottom + margin;
+        _diagnosticsPanel.Location = new DrawingPoint(x, y);
+    }
+
+    private void UpdateDiagnosticsPanelText()
+    {
+        if (_diagnosticsLabel is null)
+        {
+            return;
+        }
+
+        _diagnosticsLabel.Text =
+            $"FFmpeg: {_diagnosticsFfmpegStatus}\r\n" +
+            $"Install: {_diagnosticsInstallStatus}\r\n" +
+            $"Last export: {_diagnosticsLastExportStatus}\r\n" +
+            $"Last error: {_diagnosticsLastError}" +
+            (string.IsNullOrWhiteSpace(_diagnosticsCopyStatus) ? string.Empty : $"\r\n{_diagnosticsCopyStatus}");
+    }
+
+    private void RecordDiagnostics(string? ffmpegStatus = null, string? installStatus = null, string? exportStatus = null, string? error = null)
+    {
+        if (ffmpegStatus is not null)
+        {
+            _diagnosticsFfmpegStatus = ffmpegStatus;
+        }
+        if (installStatus is not null)
+        {
+            _diagnosticsInstallStatus = installStatus;
+        }
+        if (exportStatus is not null)
+        {
+            _diagnosticsLastExportStatus = exportStatus;
+        }
+        if (error is not null)
+        {
+            _diagnosticsLastError = error;
+        }
+        _diagnosticsCopyStatus = string.Empty;
+
+        UpdateDiagnosticsPanelText();
+    }
+
+    private void CopyDiagnosticsToClipboard()
+    {
+        string payload =
+            $"FFmpeg: {_diagnosticsFfmpegStatus}\r\n" +
+            $"Install: {_diagnosticsInstallStatus}\r\n" +
+            $"Last export: {_diagnosticsLastExportStatus}\r\n" +
+            $"Last error: {_diagnosticsLastError}";
+        try
+        {
+            Clipboard.SetText(payload);
+            _diagnosticsCopyStatus = "Diagnostics copied.";
+        }
+        catch (Exception ex)
+        {
+            _diagnosticsCopyStatus = $"Copy failed: {ex.Message}";
+        }
+
+        UpdateDiagnosticsPanelText();
+    }
+
+    private static Bitmap CreateDiagnosticsIcon(Color strokeColor)
+    {
+        var bmp = new Bitmap(18, 18);
+        using Graphics g = Graphics.FromImage(bmp);
+        g.Clear(Color.Transparent);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var pen = new Pen(strokeColor, 1.4f);
+        using var brush = new SolidBrush(strokeColor);
+        g.DrawRectangle(pen, 3, 3, 12, 12);
+        g.DrawLine(pen, 6, 7, 12, 7);
+        g.DrawLine(pen, 6, 10, 12, 10);
+        g.FillEllipse(brush, 7, 13, 4, 3);
+        return bmp;
+    }
+
     private static Bitmap CreateHelpIcon(Color strokeColor)
     {
         var bmp = new Bitmap(18, 18);
@@ -2064,6 +2243,10 @@ public partial class Form1 : Form
         if (_helpTopBarButton is not null)
         {
             _uiToolTip.SetToolTip(_helpTopBarButton, "Help (F1)");
+        }
+        if (_diagnosticsTopBarButton is not null)
+        {
+            _uiToolTip.SetToolTip(_diagnosticsTopBarButton, "Toggle diagnostics panel");
         }
 
         _uiToolTip.SetToolTip(useWindowSourceButton, "Capture a live app window for the active side");
@@ -3121,7 +3304,7 @@ public partial class Form1 : Form
 
     private void UpdatePlaybackStatus()
     {
-        EnsureAllPreviewScrollStates();
+        EnsurePreviewFramesVisible();
 
         string leftStatus = _leftTrack.IsTemporaryWindowSource
             ? "A live window"
@@ -3153,6 +3336,53 @@ public partial class Form1 : Form
         }
 
         UpdateTrimActionButtonsState();
+    }
+
+    private void EnsurePreviewFramesVisible()
+    {
+        if (_isPlaying || _isRepairingPreviewFrames)
+        {
+            return;
+        }
+
+        int globalFrame = Math.Clamp(masterTimeline.Value, 0, Math.Max(0, masterTimeline.Maximum));
+        _isRepairingPreviewFrames = true;
+        try
+        {
+            foreach (VideoTrack track in new[] { _leftTrack, _rightTrack })
+            {
+                if (!track.IsLoaded || track.IsTemporaryWindowSource)
+                {
+                    continue;
+                }
+
+                if (track.IsPlaybackVisible)
+                {
+                    track.ShowStillFrame();
+                }
+
+                bool missingStillFrame = track.PictureBox.Image is null;
+                if (!missingStillFrame)
+                {
+                    continue;
+                }
+
+                int localFrame = globalFrame - track.TimelineStartFrame;
+                if (localFrame < 0 || localFrame > track.LastFrameIndex)
+                {
+                    continue;
+                }
+
+                // lightweight render avoids recursive status updates.
+                RenderTrack(track, localFrame, updateMasterTimeline: false, lightweight: true);
+                ApplyScale(track);
+                track.MarkerPanel.Invalidate();
+            }
+        }
+        finally
+        {
+            _isRepairingPreviewFrames = false;
+        }
     }
 
     private void EnsureAllPreviewScrollStates()
