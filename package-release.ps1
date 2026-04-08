@@ -15,6 +15,12 @@ if (Test-Path $zipPath) {
   Remove-Item -LiteralPath $zipPath -Force
 }
 
+# Ensure release zip always contains an empty Projects folder for first run.
+$projectsDir = Join-Path $publishOutput "Projects"
+New-Item -ItemType Directory -Force -Path $projectsDir | Out-Null
+$projectsKeepFile = Join-Path $projectsDir "KEEP_PROJECTS_FOLDER.txt"
+Set-Content -LiteralPath $projectsKeepFile -Value "This file keeps the Projects folder in release archives." -NoNewline
+
 Compress-Archive -Path (Join-Path $publishOutput "*") -DestinationPath $zipPath -CompressionLevel Optimal
 
 Write-Host ""

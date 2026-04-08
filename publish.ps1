@@ -23,6 +23,12 @@ if ($LASTEXITCODE -ne 0) {
   throw "dotnet publish failed"
 }
 
+# Ensure end users get a ready-to-use projects folder in published output.
+$publishProjectsDir = Join-Path $output "Projects"
+New-Item -ItemType Directory -Force -Path $publishProjectsDir | Out-Null
+$projectsKeepFile = Join-Path $publishProjectsDir "KEEP_PROJECTS_FOLDER.txt"
+Set-Content -LiteralPath $projectsKeepFile -Value "This file keeps the Projects folder in release archives." -NoNewline
+
 Get-ChildItem -Path $output -File | ForEach-Object {
   $destination = Join-Path $root $_.Name
   if (Test-Path $destination) {
@@ -32,6 +38,10 @@ Get-ChildItem -Path $output -File | ForEach-Object {
 }
 
 Get-ChildItem -Path $output -Directory | ForEach-Object {
+  # Never overwrite user project files in root Projects folder.
+  if ($_.Name -ieq "Projects") {
+    return
+  }
   $destination = Join-Path $root $_.Name
   if (Test-Path $destination) {
     Remove-Item -LiteralPath $destination -Recurse -Force
