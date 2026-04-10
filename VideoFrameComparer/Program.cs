@@ -8,6 +8,51 @@ static class Program
     [STAThread]
     static void Main()
     {
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) =>
+        {
+            try
+            {
+                AppLog.WriteError("Unhandled UI exception", e.Exception);
+            }
+            finally
+            {
+                MessageBox.Show(
+                    "FrameComp hit an unexpected error and needs to close.\n\n" +
+                    "A log file was written next to the app:\n" +
+                    Path.Combine(AppContext.BaseDirectory, "FrameComp.log") +
+                    "\n\n" +
+                    e.Exception.Message,
+                    "Unexpected Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                Environment.Exit(1);
+            }
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            Exception? ex = e.ExceptionObject as Exception;
+            AppLog.WriteError("Unhandled non-UI exception", ex);
+            try
+            {
+                MessageBox.Show(
+                    "FrameComp hit an unexpected error and needs to close.\n\n" +
+                    "A log file was written next to the app:\n" +
+                    Path.Combine(AppContext.BaseDirectory, "FrameComp.log"),
+                    "Unexpected Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            catch
+            {
+            }
+        };
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            AppLog.WriteError("Unobserved task exception", e.Exception);
+            e.SetObserved();
+        };
+
         // To customize application configuration such as set high DPI settings or default font,
         // see https://aka.ms/applicationconfiguration.
         ApplicationConfiguration.Initialize();
@@ -27,8 +72,9 @@ static class Program
         catch (Exception ex)
         {
             splashHost.Close();
+            AppLog.WriteError("Startup error while creating main form", ex);
             MessageBox.Show(
-                $"Could not open the selected project.\n\n{ex.Message}",
+                $"Could not open the selected project.\n\n{ex.Message}\n\nLog:\n{Path.Combine(AppContext.BaseDirectory, "FrameComp.log")}",
                 "Startup Error",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);

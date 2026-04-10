@@ -503,7 +503,7 @@ partial class Form1
         Controls.Add(bottomTransportPanel);
         Controls.Add(topBarPanel);
         KeyPreview = true;
-        MinimumSize = new Size(1024, 720);
+        MinimumSize = new Size(900, 620);
         Name = "Form1";
         StartPosition = FormStartPosition.CenterScreen;
         Text = "Video Frame Comparer";

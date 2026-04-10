@@ -94,7 +94,11 @@ public partial class Form1
             }
 
             var builder = new System.Text.StringBuilder(length + 1);
-            GetWindowText(handle, builder, builder.Capacity);
+            int copied = GetWindowText(handle, builder, builder.Capacity);
+            if (copied <= 0)
+            {
+                return true;
+            }
             string title = builder.ToString().Trim();
             if (string.IsNullOrWhiteSpace(title))
             {

@@ -14,8 +14,8 @@ namespace VideoFrameComparer;
 
 public partial class Form1 : Form
 {
-    private const string PlayIcon = "▶";
-    private const string PauseIcon = "❚❚";
+    private const string PlayIcon = "\u25B6";
+    private const string PauseIcon = "\u275A\u275A";
     private const int LargeStep = 20;
     private const int MarkerSnapThresholdPixels = 24;
     private const int MarkerSnapReleaseThresholdPixels = 36;
@@ -47,6 +47,16 @@ public partial class Form1 : Form
     private const int NvencH264MaxHeight = 4096;
     private const int NvencHevcMaxWidth = 8192;
     private const int NvencHevcMaxHeight = 8192;
+    private const int WmSizing = 0x0214;
+    private const int WmszLeft = 1;
+    private const int WmszRight = 2;
+    private const int WmszTop = 3;
+    private const int WmszTopLeft = 4;
+    private const int WmszTopRight = 5;
+    private const int WmszBottom = 6;
+    private const int WmszBottomLeft = 7;
+    private const int WmszBottomRight = 8;
+    private const double InitialAutoSizeScreenFraction = 0.75d;
     private static readonly string[] SupportedExtensions = [".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v"];
     private static readonly float[] PlaybackSpeedOptions = [0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f];
     private const string VideoFileDialogFilter =
@@ -79,6 +89,9 @@ public partial class Form1 : Form
     private bool _isUpdatingSharedCommentsList;
     private bool _isCommentsSidebarCollapsed;
     private bool _suppressAutoWindowResize;
+    private DateTime _lastAspectLockLogTimeUtc = DateTime.MinValue;
+    private string _lastAspectLockStatus = string.Empty;
+    private bool _initialContentSizeApplied;
     private PictureBox? _alignmentOverlayPictureBox;
     private Panel? _clipTimelineViewport;
     private Panel? _clipTimelineCanvas;
@@ -111,26 +124,28 @@ public partial class Form1 : Form
     private Image? _layoutSideBySideInactiveIcon;
     private Button? _helpTopBarButton;
     private Image? _helpIcon;
-    private Button? _diagnosticsTopBarButton;
-    private Image? _diagnosticsIcon;
-    private Panel? _diagnosticsPanel;
-    private Label? _diagnosticsLabel;
-    private Button? _copyDiagnosticsButton;
     private readonly ToolTip _uiToolTip = new ToolTip();
     private Panel? _transportHostPanel;
     private Panel? _transportLeftPanel;
     private Panel? _transportRightPanel;
     private int? _globalTrimInFrame;
     private int? _globalTrimOutFrame;
-    private Button? _saveTrimmedVideosTopBarButton;
+    private Button? _windowSourceTopBarButton;
+    private Button? _overlayTopBarButton;
+    private Button? _screenshotTopBarButton;
     private Button? _saveCombinedVideoTopBarButton;
+    private Image? _windowSourceIcon;
+    private Image? _backToVideoIcon;
+    private Image? _overlayActiveIcon;
+    private Image? _overlayInactiveIcon;
+    private Image? _screenshotIcon;
+    private Image? _combineIcon;
     private bool _isSavingTrimmedVideos;
     private bool _isRepairingPreviewFrames;
     private string _diagnosticsFfmpegStatus = "Not checked";
     private string _diagnosticsInstallStatus = "Not run";
     private string _diagnosticsLastExportStatus = "None";
     private string _diagnosticsLastError = "None";
-    private string _diagnosticsCopyStatus = string.Empty;
     private string _diagnosticsEncoderStatus = "Unknown";
     private string? _cachedFfmpegEncodersOutput;
     // Export quality is fixed to a high-quality preset (no UI toggle).
@@ -139,7 +154,10 @@ public partial class Form1 : Form
     {
         _projectFilePath = projectFilePath;
         AppLog.Write("App starting.");
-        Core.Initialize();
+        string arch = Environment.Is64BitProcess ? "win-x64" : "win-x86";
+        string libVlcDir = Path.Combine(AppContext.BaseDirectory, "libvlc", arch);
+        AppLog.Write($"Initializing LibVLC from: {libVlcDir}");
+        Core.Initialize(libVlcDir);
         AppLog.Write("LibVLCSharp core initialized.");
         _libVlc = new LibVLC("--no-video-title-show");
         AppLog.Write("LibVLC instance created.");
@@ -147,6 +165,7 @@ public partial class Form1 : Form
         InitializeComponent();
         topBarPanel.Height = TopBarHeight;
         useWindowSourceButton.Location = new DrawingPoint(useWindowSourceButton.Left, 14);
+        useWindowSourceButton.Visible = false;
         helpLabel.Visible = false;
         restoreVideoSourceButton.Visible = false;
         alignmentModeCheckBox.Visible = false;
@@ -188,8 +207,8 @@ public partial class Form1 : Form
         ConfigureTrackLayout(_rightTrack);
         UpdateEmptyHintState(_leftTrack);
         UpdateEmptyHintState(_rightTrack);
-        leftImagePanel.Resize += (_, _) => ApplyScale(_leftTrack);
-        rightImagePanel.Resize += (_, _) => ApplyScale(_rightTrack);
+        leftImagePanel.Resize += (_, _) => HandleTrackViewportResize(_leftTrack);
+        rightImagePanel.Resize += (_, _) => HandleTrackViewportResize(_rightTrack);
         _playbackTimer = new System.Windows.Forms.Timer { Interval = 33 };
         _playbackTimer.Tick += PlaybackTimer_Tick;
         _windowSourceTimer = new System.Windows.Forms.Timer { Interval = 33 };
@@ -214,10 +233,10 @@ public partial class Form1 : Form
         LayoutTopBarButtons();
         LayoutTopBarControls();
         InitializeHelpUi();
-        InitializeDiagnosticsUi();
         InitializeTrimTopBarButtons();
         ConfigureTooltips();
         UpdateTrimActionButtonsState();
+        UpdateAspectLockStatus(forceUpdateTitle: true);
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -235,6 +254,24 @@ public partial class Form1 : Form
         base.OnFormClosing(e);
     }
 
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        EnsureWindowOnScreen();
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == WmSizing &&
+            WindowState == FormWindowState.Normal &&
+            TryGetSizingAspectLockParameters(out SizingLockParameters sizingParameters))
+        {
+            ApplySizingAspectLock(m.WParam.ToInt32(), m.LParam, sizingParameters);
+        }
+
+        base.WndProc(ref m);
+    }
+
     private void DisposeUiImages()
     {
         DisposeImage(ref _layoutStackedActiveIcon);
@@ -244,7 +281,12 @@ public partial class Form1 : Form
         DisposeImage(ref _commentsActiveIcon);
         DisposeImage(ref _commentsInactiveIcon);
         DisposeImage(ref _helpIcon);
-        DisposeImage(ref _diagnosticsIcon);
+        DisposeImage(ref _windowSourceIcon);
+        DisposeImage(ref _backToVideoIcon);
+        DisposeImage(ref _overlayActiveIcon);
+        DisposeImage(ref _overlayInactiveIcon);
+        DisposeImage(ref _screenshotIcon);
+        DisposeImage(ref _combineIcon);
     }
 
     private static void DisposeImage(ref Image? image)
@@ -478,13 +520,6 @@ public partial class Form1 : Form
         int gap = 6;
         int commentsX = Math.Max(0, topBarPanel.ClientSize.Width - _toggleCommentsTopBarButton.Width - rightMargin);
         int helpX = commentsX;
-        if (_diagnosticsTopBarButton is not null)
-        {
-            int diagnosticsX = Math.Max(0, commentsX - _diagnosticsTopBarButton.Width - gap);
-            _diagnosticsTopBarButton.Location = new DrawingPoint(diagnosticsX, y);
-            _diagnosticsTopBarButton.BringToFront();
-            helpX = diagnosticsX;
-        }
         helpX = Math.Max(0, helpX - _helpTopBarButton.Width - gap);
         _helpTopBarButton.Location = new DrawingPoint(helpX, y);
         _toggleCommentsTopBarButton.Location = new DrawingPoint(
@@ -492,48 +527,89 @@ public partial class Form1 : Form
             y);
         _helpTopBarButton.BringToFront();
         _toggleCommentsTopBarButton.BringToFront();
-        LayoutDiagnosticsPanel();
     }
 
     private void LayoutTopBarControls()
     {
-        int y = useWindowSourceButton.Top;
-        int nextX = useWindowSourceButton.Right + 12;
-
-        if (alignmentModeCheckBox.Visible)
+        int y = 12;
+        int nextX = 112;
+        if (_layoutSideBySideButton is not null)
         {
-            alignmentModeCheckBox.Location = new DrawingPoint(nextX, useWindowSourceButton.Top + 3);
-            nextX = alignmentModeCheckBox.Right + 14;
-        }
-        else
-        {
-            alignmentModeCheckBox.Location = new DrawingPoint(nextX, useWindowSourceButton.Top + 3);
+            nextX = _layoutSideBySideButton.Right + 14;
         }
 
-        if (_saveTrimmedVideosTopBarButton is not null)
+        if (_windowSourceTopBarButton is not null)
         {
-            _saveTrimmedVideosTopBarButton.Location = new DrawingPoint(nextX, y);
-            _saveTrimmedVideosTopBarButton.BringToFront();
-            nextX = _saveTrimmedVideosTopBarButton.Right + 8;
+            _windowSourceTopBarButton.Location = new DrawingPoint(nextX, y);
+            _windowSourceTopBarButton.BringToFront();
+            nextX = _windowSourceTopBarButton.Right + 6;
+        }
+
+        if (_overlayTopBarButton is not null)
+        {
+            _overlayTopBarButton.Location = new DrawingPoint(nextX, y);
+            _overlayTopBarButton.BringToFront();
+            nextX = _overlayTopBarButton.Right + 14;
+        }
+
+        if (_screenshotTopBarButton is not null)
+        {
+            _screenshotTopBarButton.Location = new DrawingPoint(nextX, y);
+            _screenshotTopBarButton.BringToFront();
+            nextX = _screenshotTopBarButton.Right + 8;
         }
 
         if (_saveCombinedVideoTopBarButton is not null)
         {
             _saveCombinedVideoTopBarButton.Location = new DrawingPoint(nextX, y);
             _saveCombinedVideoTopBarButton.BringToFront();
+            nextX = _saveCombinedVideoTopBarButton.Right + 14;
         }
-
-        alignmentModeCheckBox.BringToFront();
     }
 
     private void InitializeTrimTopBarButtons()
     {
-        _saveTrimmedVideosTopBarButton = CreateTopBarActionButton("Save Trimmed Videos", SaveTrimmedVideosButton_Click);
-        _saveTrimmedVideosTopBarButton.Size = new DrawingSize(148, 24);
-        _saveCombinedVideoTopBarButton = CreateTopBarActionButton("Save Combined Video", SaveCombinedVideoButton_Click);
-        _saveCombinedVideoTopBarButton.Size = new DrawingSize(146, 24);
-        topBarPanel.Controls.Add(_saveTrimmedVideosTopBarButton);
+        _windowSourceTopBarButton = CreateTopBarActionButton(string.Empty, (_, _) => useWindowSourceButton_Click(useWindowSourceButton, EventArgs.Empty));
+        _windowSourceTopBarButton.Size = new DrawingSize(32, 28);
+        _windowSourceTopBarButton.ImageAlign = ContentAlignment.MiddleCenter;
+        _windowSourceIcon = CreateWindowSourceIcon(Color.FromArgb(238, 238, 238));
+        _backToVideoIcon = CreateBackToVideoIcon(Color.FromArgb(238, 238, 238));
+        _windowSourceTopBarButton.Image = _windowSourceIcon;
+
+        _overlayTopBarButton = CreateTopBarActionButton(string.Empty, (_, _) => alignmentModeCheckBox.Checked = !alignmentModeCheckBox.Checked);
+        _overlayTopBarButton.Size = new DrawingSize(32, 28);
+        _overlayTopBarButton.ImageAlign = ContentAlignment.MiddleCenter;
+        _overlayActiveIcon = CreateOverlayIcon(Color.FromArgb(238, 238, 238));
+        _overlayInactiveIcon = CreateOverlayIcon(Color.FromArgb(140, 140, 140));
+        _overlayTopBarButton.Image = _overlayInactiveIcon;
+
+        _screenshotTopBarButton = CreateTopBarActionButton(string.Empty, SaveScreenshotButton_Click);
+        _screenshotTopBarButton.Size = new DrawingSize(32, 28);
+        _screenshotTopBarButton.ImageAlign = ContentAlignment.MiddleCenter;
+        _screenshotIcon = CreateScreenshotIcon(Color.FromArgb(238, 238, 238));
+        _screenshotTopBarButton.Image = _screenshotIcon;
+
+        _saveCombinedVideoTopBarButton = CreateTopBarActionButton(string.Empty, SaveCombinedVideoButton_Click);
+        _saveCombinedVideoTopBarButton.Size = new DrawingSize(32, 28);
+        _saveCombinedVideoTopBarButton.ImageAlign = ContentAlignment.MiddleCenter;
+        _combineIcon = CreateExportIcon(Color.FromArgb(238, 238, 238));
+        _saveCombinedVideoTopBarButton.Image = _combineIcon;
+        _saveCombinedVideoTopBarButton.AccessibleName = "Export Video";
+        _uiToolTip.SetToolTip(_saveCombinedVideoTopBarButton, "Export one combined video in current layout (side-by-side or stacked)");
+        _saveCombinedVideoTopBarButton.MouseHover += (_, _) =>
+            _uiToolTip.Show(
+                "Export one combined video in current layout (side-by-side or stacked)",
+                _saveCombinedVideoTopBarButton,
+                _saveCombinedVideoTopBarButton.Width / 2,
+                _saveCombinedVideoTopBarButton.Height + 6,
+                2500);
+        _saveCombinedVideoTopBarButton.MouseLeave += (_, _) => _uiToolTip.Hide(_saveCombinedVideoTopBarButton);
+        topBarPanel.Controls.Add(_windowSourceTopBarButton);
+        topBarPanel.Controls.Add(_overlayTopBarButton);
+        topBarPanel.Controls.Add(_screenshotTopBarButton);
         topBarPanel.Controls.Add(_saveCombinedVideoTopBarButton);
+        UpdateWindowSourceTimerState();
+        UpdateOverlayTopBarButtonState();
         LayoutTopBarControls();
     }
 
@@ -543,12 +619,97 @@ public partial class Form1 : Form
         {
             Text = text,
             Size = new DrawingSize(74, 24),
-            FlatStyle = FlatStyle.Standard,
-            UseVisualStyleBackColor = true,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.Transparent,
+            ForeColor = Color.White,
+            UseVisualStyleBackColor = false,
             TabStop = false
         };
+        button.FlatAppearance.BorderSize = 0;
+        button.FlatAppearance.MouseDownBackColor = Color.Transparent;
+        button.FlatAppearance.MouseOverBackColor = Color.Transparent;
         button.Click += onClick;
         return button;
+    }
+
+    private static Bitmap CreateWindowSourceIcon(Color strokeColor)
+    {
+        var bmp = new Bitmap(18, 18);
+        using Graphics g = Graphics.FromImage(bmp);
+        g.Clear(Color.Transparent);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var pen = new Pen(strokeColor, 1.5f);
+        g.DrawRectangle(pen, 2, 3, 14, 10);
+        g.DrawLine(pen, 8, 13, 10, 13);
+        g.DrawLine(pen, 6, 15, 12, 15);
+        return bmp;
+    }
+
+    private static Bitmap CreateBackToVideoIcon(Color strokeColor)
+    {
+        var bmp = new Bitmap(18, 18);
+        using Graphics g = Graphics.FromImage(bmp);
+        g.Clear(Color.Transparent);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var pen = new Pen(strokeColor, 1.5f);
+        g.DrawRectangle(pen, 6, 3, 10, 10);
+        g.DrawLine(pen, 2, 8, 9, 8);
+        g.DrawLine(pen, 2, 8, 5, 5);
+        g.DrawLine(pen, 2, 8, 5, 11);
+        return bmp;
+    }
+
+    private static Bitmap CreateOverlayIcon(Color strokeColor)
+    {
+        var bmp = new Bitmap(18, 18);
+        using Graphics g = Graphics.FromImage(bmp);
+        g.Clear(Color.Transparent);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var pen = new Pen(strokeColor, 1.5f);
+        using (GraphicsPath backShape = CreateRoundedRectPath(new Rectangle(2, 4, 8, 8), 2))
+        {
+            g.DrawPath(pen, backShape);
+        }
+        using (GraphicsPath frontShape = CreateRoundedRectPath(new Rectangle(8, 7, 8, 8), 2))
+        {
+            g.DrawPath(pen, frontShape);
+        }
+        return bmp;
+    }
+
+    private static Bitmap CreateScreenshotIcon(Color strokeColor)
+    {
+        var bmp = new Bitmap(18, 18);
+        using Graphics g = Graphics.FromImage(bmp);
+        g.Clear(Color.Transparent);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var pen = new Pen(strokeColor, 1.5f);
+        using var fill = new SolidBrush(strokeColor);
+        g.DrawRectangle(pen, 3, 5, 12, 9);
+        g.DrawRectangle(pen, 6, 3, 4, 2);
+        g.DrawEllipse(pen, 7, 8, 4, 4);
+        g.FillEllipse(fill, 8, 9, 2, 2);
+        return bmp;
+    }
+
+    private static Bitmap CreateExportIcon(Color strokeColor)
+    {
+        var bmp = new Bitmap(18, 18);
+        using Graphics g = Graphics.FromImage(bmp);
+        g.Clear(Color.Transparent);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var pen = new Pen(strokeColor, 1.5f);
+        // Frame (open at top-right) + outgoing arrow for export/share feel.
+        g.DrawLine(pen, 3, 6, 3, 15);
+        g.DrawLine(pen, 3, 15, 12, 15);
+        g.DrawLine(pen, 12, 15, 12, 12);
+        g.DrawLine(pen, 3, 6, 6, 6);
+
+        // Arrow out to top-right
+        g.DrawLine(pen, 6, 12, 14, 4);
+        g.DrawLine(pen, 10, 4, 14, 4);
+        g.DrawLine(pen, 14, 4, 14, 8);
+        return bmp;
     }
 
     private static Bitmap CreateCommentsIcon(Color strokeColor)
@@ -783,6 +944,7 @@ public partial class Form1 : Form
         _clipTimelineCanvas?.Invalidate();
         UpdatePlaybackStatus();
         UpdateWindowToContent();
+        SnapWindowToMasterAspect();
         SaveSession();
     }
 
@@ -919,6 +1081,11 @@ public partial class Form1 : Form
         }
         useWindowSourceButton.Text = hasTemporarySource ? "Back To Video" : "Use App Window";
         useWindowSourceButton.Enabled = true;
+        if (_windowSourceTopBarButton is not null)
+        {
+            _windowSourceTopBarButton.Image = hasTemporarySource ? _backToVideoIcon : _windowSourceIcon;
+            _windowSourceTopBarButton.Enabled = true;
+        }
         UpdateAlignmentModeAvailability();
         LayoutTopBarControls();
         UpdateEmptyHintState(_leftTrack);
@@ -927,14 +1094,29 @@ public partial class Form1 : Form
 
     private void UpdateAlignmentModeAvailability()
     {
-        bool hasTemporarySource = _leftTrack.IsTemporaryWindowSource || _rightTrack.IsTemporaryWindowSource;
-        if (!hasTemporarySource && alignmentModeCheckBox.Checked)
+        bool leftReady = _leftTrack.IsLoaded || _leftTrack.IsTemporaryWindowSource;
+        bool rightReady = _rightTrack.IsLoaded || _rightTrack.IsTemporaryWindowSource;
+        bool canOverlay = leftReady && rightReady;
+        if (!canOverlay && alignmentModeCheckBox.Checked)
         {
             alignmentModeCheckBox.Checked = false;
         }
 
-        alignmentModeCheckBox.Visible = hasTemporarySource;
-        alignmentModeCheckBox.Enabled = hasTemporarySource;
+        alignmentModeCheckBox.Visible = false;
+        alignmentModeCheckBox.Enabled = canOverlay;
+        UpdateOverlayTopBarButtonState();
+    }
+
+    private void UpdateOverlayTopBarButtonState()
+    {
+        if (_overlayTopBarButton is null)
+        {
+            return;
+        }
+
+        bool canOverlay = alignmentModeCheckBox.Enabled;
+        _overlayTopBarButton.Enabled = canOverlay;
+        _overlayTopBarButton.Image = alignmentModeCheckBox.Checked ? _overlayActiveIcon : _overlayInactiveIcon;
     }
 
     private static string? TryGetDroppedVideoPath(IDataObject? data)
@@ -1023,6 +1205,7 @@ public partial class Form1 : Form
             StopPlayback();
         }
 
+        UpdateOverlayTopBarButtonState();
         UpdateAlignmentPreview();
     }
 
@@ -1107,22 +1290,23 @@ public partial class Form1 : Form
         {
             _uiToolTip.SetToolTip(_helpTopBarButton, "Help (F1)");
         }
-        if (_diagnosticsTopBarButton is not null)
+        if (_windowSourceTopBarButton is not null)
         {
-            _uiToolTip.SetToolTip(_diagnosticsTopBarButton, "Toggle diagnostics panel");
+            _uiToolTip.SetToolTip(_windowSourceTopBarButton, "Use app window for active side (toggles back to video)");
         }
-
-        _uiToolTip.SetToolTip(useWindowSourceButton, "Capture a live app window for the active side");
-        _uiToolTip.SetToolTip(alignmentModeCheckBox, "Overlay both sides to check visual alignment");
+        if (_overlayTopBarButton is not null)
+        {
+            _uiToolTip.SetToolTip(_overlayTopBarButton, "Overlay mode for alignment");
+        }
         _uiToolTip.SetToolTip(playPauseButton, "Play or pause (Space)");
         _uiToolTip.SetToolTip(speedComboBox, "Playback speed");
-        if (_saveTrimmedVideosTopBarButton is not null)
+        if (_screenshotTopBarButton is not null)
         {
-            _uiToolTip.SetToolTip(_saveTrimmedVideosTopBarButton, "Save trimmed videos using shared In/Out range (I/O, clear with X)");
+            _uiToolTip.SetToolTip(_screenshotTopBarButton, "Save screenshot of the current visible comparison view");
         }
         if (_saveCombinedVideoTopBarButton is not null)
         {
-            _uiToolTip.SetToolTip(_saveCombinedVideoTopBarButton, "Save one combined video in current layout (side-by-side or stacked)");
+            _uiToolTip.SetToolTip(_saveCombinedVideoTopBarButton, "Export one combined video in current layout (side-by-side or stacked)");
         }
         if (_clipTimelineCanvas is not null)
         {
@@ -1155,6 +1339,11 @@ public partial class Form1 : Form
             Padding = new Padding(14, 12, 14, 8)
         };
         content.Controls.Add(CreateHelpSection(
+            "Top Bar",
+            "Window icon: use app window / back to video\r\nOverlay icon: align both views\r\nCamera: save screenshot\r\nExport: save combined video",
+            CreateHelpTopBarIcon()));
+
+        content.Controls.Add(CreateHelpSection(
             "Playback",
             "Space: Play/Pause\r\nSpeed dropdown: playback speed",
             CreateHelpPlaybackIcon()));
@@ -1180,7 +1369,7 @@ public partial class Form1 : Form
             Height = 26,
             TextAlign = ContentAlignment.MiddleRight,
             ForeColor = Color.FromArgb(145, 145, 145),
-            Text = "Press Esc to close",
+            Text = $"v{Application.ProductVersion} | Log: FrameComp.log | Esc: close",
             Padding = new Padding(0, 0, 8, 0)
         };
         helpForm.Controls.Add(content);
@@ -1198,10 +1387,15 @@ public partial class Form1 : Form
 
     private static Panel CreateHelpSection(string title, string body, Bitmap icon)
     {
+        const int sectionWidth = 500;
+        const int textLeft = 30;
+        const int textWidth = 460;
+        const int sectionBottomPadding = 8;
+
         var section = new Panel
         {
-            Width = 500,
-            Height = 108,
+            Width = sectionWidth,
+            Height = 96,
             Margin = new Padding(0, 0, 0, 8),
             BackColor = Color.Transparent
         };
@@ -1216,7 +1410,7 @@ public partial class Form1 : Form
         {
             AutoSize = false,
             Location = new DrawingPoint(30, 0),
-            Width = 460,
+            Width = textWidth,
             Height = 24,
             ForeColor = Color.FromArgb(225, 225, 225),
             Font = new Font("Segoe UI Semibold", 10f, FontStyle.Bold),
@@ -1225,13 +1419,21 @@ public partial class Form1 : Form
         var text = new Label
         {
             AutoSize = false,
-            Location = new DrawingPoint(30, 24),
-            Width = 460,
-            Height = 80,
+            Location = new DrawingPoint(textLeft, 24),
+            Width = textWidth,
             ForeColor = Color.FromArgb(170, 170, 170),
             Font = new Font("Segoe UI", 9f, FontStyle.Regular),
             Text = body
         };
+
+        DrawingSize measured = TextRenderer.MeasureText(
+            body,
+            text.Font,
+            new DrawingSize(textWidth, int.MaxValue),
+            TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding);
+        text.Height = Math.Max(22, measured.Height + 2);
+        section.Height = text.Bottom + sectionBottomPadding;
+
         section.Controls.Add(iconBox);
         section.Controls.Add(heading);
         section.Controls.Add(text);
@@ -1244,14 +1446,28 @@ public partial class Form1 : Form
         using Graphics g = Graphics.FromImage(bmp);
         g.Clear(Color.Transparent);
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        using var fill = new SolidBrush(Color.FromArgb(230, 230, 230));
+        using var fill = new SolidBrush(Color.FromArgb(224, 224, 224));
         DrawingPoint[] triangle =
         [
-            new DrawingPoint(5, 3),
-            new DrawingPoint(14, 9),
-            new DrawingPoint(5, 15)
+            new DrawingPoint(5, 4),
+            new DrawingPoint(13, 9),
+            new DrawingPoint(5, 14)
         ];
         g.FillPolygon(fill, triangle);
+        return bmp;
+    }
+
+    private static Bitmap CreateHelpTopBarIcon()
+    {
+        var bmp = new Bitmap(18, 18);
+        using Graphics g = Graphics.FromImage(bmp);
+        g.Clear(Color.Transparent);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var pen = new Pen(Color.FromArgb(224, 224, 224), 1.5f);
+        g.DrawRectangle(pen, 2.5f, 3.5f, 13f, 11f);
+        g.DrawLine(pen, 2.8f, 8f, 15.2f, 8f);
+        g.DrawLine(pen, 6.2f, 11f, 9f, 11f);
+        g.DrawLine(pen, 10.8f, 11f, 13.6f, 11f);
         return bmp;
     }
 
@@ -1261,16 +1477,16 @@ public partial class Form1 : Form
         using Graphics g = Graphics.FromImage(bmp);
         g.Clear(Color.Transparent);
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        using var linePen = new Pen(Color.FromArgb(175, 175, 175), 1.5f);
+        using var linePen = new Pen(Color.FromArgb(160, 160, 160), 1.5f);
         using var playheadPen = new Pen(Color.FromArgb(80, 160, 255), 1.8f);
         using var playheadBrush = new SolidBrush(Color.FromArgb(80, 160, 255));
-        g.DrawLine(linePen, 2, 12, 16, 12);
-        g.DrawLine(playheadPen, 9, 2, 9, 15);
+        g.DrawLine(linePen, 3, 12, 15, 12);
+        g.DrawLine(playheadPen, 9, 3, 9, 14);
         DrawingPoint[] handle =
         [
-            new DrawingPoint(6, 2),
-            new DrawingPoint(12, 2),
-            new DrawingPoint(9, 6)
+            new DrawingPoint(6, 3),
+            new DrawingPoint(12, 3),
+            new DrawingPoint(9, 7)
         ];
         g.FillPolygon(playheadBrush, handle);
         return bmp;
@@ -1282,20 +1498,20 @@ public partial class Form1 : Form
         using Graphics g = Graphics.FromImage(bmp);
         g.Clear(Color.Transparent);
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        using var lanePen = new Pen(Color.FromArgb(130, 130, 130), 1.2f);
+        using var lanePen = new Pen(Color.FromArgb(160, 160, 160), 1.5f);
         using var markerBrush = new SolidBrush(Color.FromArgb(255, 208, 64));
-        g.DrawLine(lanePen, 2, 13, 16, 13);
+        g.DrawLine(lanePen, 3, 13, 15, 13);
         DrawingPoint[] leftMarker =
         [
-            new DrawingPoint(5, 13),
-            new DrawingPoint(2, 8),
-            new DrawingPoint(8, 8)
+            new DrawingPoint(6, 13),
+            new DrawingPoint(3, 8),
+            new DrawingPoint(9, 8)
         ];
         DrawingPoint[] rightMarker =
         [
-            new DrawingPoint(13, 13),
-            new DrawingPoint(10, 8),
-            new DrawingPoint(16, 8)
+            new DrawingPoint(12, 13),
+            new DrawingPoint(9, 8),
+            new DrawingPoint(15, 8)
         ];
         g.FillPolygon(markerBrush, leftMarker);
         g.FillPolygon(markerBrush, rightMarker);
@@ -1308,14 +1524,14 @@ public partial class Form1 : Form
         using Graphics g = Graphics.FromImage(bmp);
         g.Clear(Color.Transparent);
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        using var keyPen = new Pen(Color.FromArgb(220, 220, 220), 1.2f);
-        using var textBrush = new SolidBrush(Color.FromArgb(220, 220, 220));
-        using (GraphicsPath key = CreateRoundedRectPath(new Rectangle(2, 3, 14, 12), 2))
+        using var keyPen = new Pen(Color.FromArgb(224, 224, 224), 1.5f);
+        using var textBrush = new SolidBrush(Color.FromArgb(224, 224, 224));
+        using (GraphicsPath key = CreateRoundedRectPath(new Rectangle(3, 4, 12, 10), 2))
         {
             g.DrawPath(keyPen, key);
         }
-        using var font = new Font("Segoe UI Semibold", 8f, FontStyle.Bold, GraphicsUnit.Pixel);
-        g.DrawString("F1", font, textBrush, new RectangleF(3, 5, 12, 8), new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
+        using var font = new Font("Segoe UI Semibold", 7.5f, FontStyle.Bold, GraphicsUnit.Pixel);
+        g.DrawString("F1", font, textBrush, new RectangleF(3, 5, 12, 7), new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
         return bmp;
     }
 
@@ -1513,10 +1729,38 @@ public partial class Form1 : Form
             }
         }
 
-        videosTableLayout.ResumeLayout();
+        videosTableLayout.ResumeLayout(performLayout: true);
+        NormalizePreviewScrollbarsAfterLayout();
         UpdateCommentsSidebarButtonText();
         UpdateVideoFit();
         UpdateWindowToContent();
+        SnapWindowToMasterAspect();
+    }
+
+    private void NormalizePreviewScrollbarsAfterLayout()
+    {
+        NormalizeTrackScrollbarAfterLayout(_leftTrack);
+        NormalizeTrackScrollbarAfterLayout(_rightTrack);
+    }
+
+    private static void NormalizeTrackScrollbarAfterLayout(VideoTrack track)
+    {
+        if (track.IsPlaybackVisible || track.ZoomMultiplier > (MinZoomMultiplier + 0.001f))
+        {
+            return;
+        }
+
+        // Force-clear stale scrollbar state that can survive panel width changes.
+        track.ImagePanel.AutoScroll = false;
+        track.ImagePanel.AutoScrollMinSize = DrawingSize.Empty;
+        track.ImagePanel.AutoScrollPosition = new DrawingPoint(0, 0);
+        track.ImagePanel.AutoScroll = true;
+    }
+
+    private void HandleTrackViewportResize(VideoTrack track)
+    {
+        NormalizeTrackScrollbarAfterLayout(track);
+        ApplyScale(track);
     }
 
     private void UpdateCommentsSidebarButtonText()
@@ -1535,6 +1779,7 @@ public partial class Form1 : Form
     {
         ApplyScale(_leftTrack);
         ApplyScale(_rightTrack);
+        EnsureAllPreviewScrollStates();
         UpdateWindowToContent();
     }
 
@@ -1542,6 +1787,9 @@ public partial class Form1 : Form
     {
         if (track.IsPlaybackVisible)
         {
+            track.ImagePanel.AutoScroll = false;
+            track.ImagePanel.AutoScrollMinSize = DrawingSize.Empty;
+            track.ImagePanel.AutoScrollPosition = new DrawingPoint(0, 0);
             track.PlaybackView.Bounds = track.ImagePanel.DisplayRectangle;
             return;
         }
@@ -1549,6 +1797,7 @@ public partial class Form1 : Form
         DrawingSize sourceFrameSize = track.DisplayFrameSize;
         if (sourceFrameSize.Width <= 0 || sourceFrameSize.Height <= 0)
         {
+            track.ImagePanel.AutoScroll = false;
             track.ImagePanel.AutoScrollMinSize = DrawingSize.Empty;
             track.ImagePanel.AutoScrollPosition = new DrawingPoint(0, 0);
             track.PictureBox.Size = new DrawingSize(320, 180);
@@ -1563,16 +1812,34 @@ public partial class Form1 : Form
             availableHeight / (float)sourceFrameSize.Height);
         float appliedScale = fitScale * track.ZoomMultiplier;
 
-        track.PictureBox.Size = new DrawingSize(
-            Math.Max(1, (int)Math.Round(sourceFrameSize.Width * appliedScale)),
-            Math.Max(1, (int)Math.Round(sourceFrameSize.Height * appliedScale)));
+        // Use floor to avoid 1px overflow from rounding when layout changes (e.g. comments toggle),
+        // which can trigger phantom horizontal scrollbars.
+        int targetWidth = Math.Max(1, (int)Math.Floor(sourceFrameSize.Width * appliedScale));
+        int targetHeight = Math.Max(1, (int)Math.Floor(sourceFrameSize.Height * appliedScale));
+        if (track.ZoomMultiplier <= (MinZoomMultiplier + 0.001f))
+        {
+            double frameAspect = sourceFrameSize.Width / (double)sourceFrameSize.Height;
+            double viewportAspect = availableWidth / (double)availableHeight;
+            if (frameAspect >= viewportAspect)
+            {
+                targetWidth = availableWidth;
+                targetHeight = Math.Max(1, (int)Math.Round(targetWidth / frameAspect));
+            }
+            else
+            {
+                targetHeight = availableHeight;
+                targetWidth = Math.Max(1, (int)Math.Round(targetHeight * frameAspect));
+            }
+        }
+
+        track.PictureBox.Size = new DrawingSize(targetWidth, targetHeight);
         UpdateTrackScrollState(track, availableWidth, availableHeight);
         UpdateTrackPreviewLayout(track);
     }
 
     private static void UpdateTrackScrollState(VideoTrack track, int viewportWidth, int viewportHeight)
     {
-        const int ScrollTolerancePixels = 2;
+        const int ScrollTolerancePixels = 10;
         bool allowScrollFromZoom = track.ZoomMultiplier > (MinZoomMultiplier + 0.001f);
         int picW = track.PictureBox.Width;
         int picH = track.PictureBox.Height;
@@ -1594,8 +1861,14 @@ public partial class Form1 : Form
         track.ImagePanel.AutoScrollMinSize = new DrawingSize(needsH ? picW : 0, needsV ? picH : 0);
         if (!needsH && !needsV)
         {
+            track.ImagePanel.AutoScroll = false;
+            track.ImagePanel.AutoScrollMinSize = DrawingSize.Empty;
             track.ImagePanel.AutoScrollPosition = new DrawingPoint(0, 0);
+            track.ImagePanel.AutoScroll = true;
+            return;
         }
+
+        track.ImagePanel.AutoScroll = true;
     }
 
     private static void UpdateTrackPreviewLayout(VideoTrack track)
@@ -2375,38 +2648,526 @@ public partial class Form1 : Form
             return;
         }
 
-        int maxVideoWidth = Math.Max(
-            _leftTrack.IsLoaded || _leftTrack.IsTemporaryWindowSource ? _leftTrack.PictureBox.Width : 0,
-            _rightTrack.IsLoaded || _rightTrack.IsTemporaryWindowSource ? _rightTrack.PictureBox.Width : 0);
-        int maxVideoHeight = Math.Max(
-            _leftTrack.IsLoaded || _leftTrack.IsTemporaryWindowSource ? _leftTrack.PictureBox.Height : 0,
-            _rightTrack.IsLoaded || _rightTrack.IsTemporaryWindowSource ? _rightTrack.PictureBox.Height : 0);
-
-        if (maxVideoWidth <= 0 || maxVideoHeight <= 0)
+        if (!TryGetBasePreviewLayoutSize(out int basePreviewWidth, out int basePreviewHeight, out int extraClientWidth, out int extraClientHeight))
         {
             return;
         }
 
-        bool horizontal = layoutComboBox.SelectedIndex == 0;
-        int previewWidth = horizontal ? (maxVideoWidth * 2) + BetweenPreviewGap : maxVideoWidth;
-        int previewHeight = horizontal ? maxVideoHeight : (maxVideoHeight * 2) + BetweenPreviewGap;
-        previewHeight += PreviewTitleHeight;
-
-        int desiredClientWidth = previewWidth + videosTableLayout.Padding.Horizontal;
-        int desiredClientHeight = TopBarHeight + previewHeight + BottomBarHeight;
-
+        int desiredClientWidth = basePreviewWidth + extraClientWidth;
+        int desiredClientHeight = basePreviewHeight + extraClientHeight;
         Rectangle workingArea = Screen.FromControl(this).WorkingArea;
         DrawingSize desiredWindow = SizeFromClientSize(new DrawingSize(desiredClientWidth, desiredClientHeight));
-        int width = Math.Min(desiredWindow.Width, workingArea.Width);
-        int height = Math.Min(desiredWindow.Height, workingArea.Height);
+        int maxAutoWidth = workingArea.Width;
+        int maxAutoHeight = workingArea.Height;
+        if (!_initialContentSizeApplied)
+        {
+            maxAutoWidth = Math.Max(MinimumSize.Width, (int)Math.Floor(workingArea.Width * InitialAutoSizeScreenFraction));
+            maxAutoHeight = Math.Max(MinimumSize.Height, (int)Math.Floor(workingArea.Height * InitialAutoSizeScreenFraction));
+        }
+
+        int width = desiredWindow.Width;
+        int height = desiredWindow.Height;
+        if (width > maxAutoWidth || height > maxAutoHeight)
+        {
+            double scale = Math.Min(
+                maxAutoWidth / (double)Math.Max(1, width),
+                maxAutoHeight / (double)Math.Max(1, height));
+            width = Math.Max(1, (int)Math.Floor(width * scale));
+            height = Math.Max(1, (int)Math.Floor(height * scale));
+        }
 
         if (WindowState == FormWindowState.Normal)
         {
             Size = new DrawingSize(
                 Math.Max(MinimumSize.Width, width),
                 Math.Max(MinimumSize.Height, height));
+            _initialContentSizeApplied = true;
+            EnsureWindowOnScreen();
         }
     }
+
+    private void SnapWindowToMasterAspect()
+    {
+        if (WindowState != FormWindowState.Normal)
+        {
+            return;
+        }
+
+        if (!TryGetSizingAspectLockParameters(out SizingLockParameters parameters))
+        {
+            return;
+        }
+
+        int currentWidth = Math.Max(1, Size.Width);
+        int currentHeight = Math.Max(1, Size.Height);
+
+        int widthFromHeight;
+        int heightFromWidth;
+        if (parameters.IsHorizontal)
+        {
+            int imagePanelHeight = Math.Max(1, currentHeight - parameters.FixedWindowHeight - parameters.TrackTitleHeight);
+            int imagePanelWidthPerSide = Math.Max(1, (int)Math.Round(imagePanelHeight * parameters.MasterAspect));
+            widthFromHeight = (imagePanelWidthPerSide * 2) + parameters.BetweenGap + parameters.FixedWindowWidth;
+
+            int imagePanelWidthFromCurrentWidth = Math.Max(1, (int)Math.Round((currentWidth - parameters.FixedWindowWidth - parameters.BetweenGap) / 2d));
+            heightFromWidth = Math.Max(1, (int)Math.Round((imagePanelWidthFromCurrentWidth / parameters.MasterAspect) + parameters.TrackTitleHeight + parameters.FixedWindowHeight));
+        }
+        else
+        {
+            int imagePanelHeight = Math.Max(1, (int)Math.Round((currentHeight - parameters.FixedWindowHeight - (parameters.TrackTitleHeight * 2) - parameters.BetweenGap) / 2d));
+            int imagePanelWidth = Math.Max(1, (int)Math.Round(imagePanelHeight * parameters.MasterAspect));
+            widthFromHeight = imagePanelWidth + parameters.FixedWindowWidth;
+
+            int imagePanelWidthFromCurrentWidth = Math.Max(1, currentWidth - parameters.FixedWindowWidth);
+            int imagePanelHeightFromWidth = Math.Max(1, (int)Math.Round(imagePanelWidthFromCurrentWidth / parameters.MasterAspect));
+            heightFromWidth = (imagePanelHeightFromWidth * 2) + parameters.BetweenGap + (parameters.TrackTitleHeight * 2) + parameters.FixedWindowHeight;
+        }
+
+        int deltaWidthPath = Math.Abs(currentHeight - heightFromWidth);
+        int deltaHeightPath = Math.Abs(currentWidth - widthFromHeight);
+
+        int targetWidth = currentWidth;
+        int targetHeight = currentHeight;
+        if (deltaWidthPath <= deltaHeightPath)
+        {
+            targetHeight = heightFromWidth;
+        }
+        else
+        {
+            targetWidth = widthFromHeight;
+        }
+
+        targetWidth = Math.Max(MinimumSize.Width, targetWidth);
+        targetHeight = Math.Max(MinimumSize.Height, targetHeight);
+        Size = new DrawingSize(targetWidth, targetHeight);
+        EnsureWindowOnScreen();
+    }
+
+    private void EnsureWindowOnScreen()
+    {
+        if (!IsHandleCreated || WindowState != FormWindowState.Normal)
+        {
+            return;
+        }
+
+        Rectangle workingArea = Screen.FromControl(this).WorkingArea;
+        int width = Size.Width;
+        int height = Size.Height;
+        if (width > workingArea.Width || height > workingArea.Height)
+        {
+            double scale = Math.Min(
+                workingArea.Width / (double)Math.Max(1, width),
+                workingArea.Height / (double)Math.Max(1, height));
+            width = Math.Max(1, (int)Math.Floor(width * scale));
+            height = Math.Max(1, (int)Math.Floor(height * scale));
+            Size = new DrawingSize(width, height);
+        }
+
+        int left = Left;
+        int top = Top;
+
+        if (left < workingArea.Left)
+        {
+            left = workingArea.Left;
+        }
+        if (top < workingArea.Top)
+        {
+            top = workingArea.Top;
+        }
+        if (left + Width > workingArea.Right)
+        {
+            left = workingArea.Right - Width;
+        }
+        if (top + Height > workingArea.Bottom)
+        {
+            top = workingArea.Bottom - Height;
+        }
+
+        // If we still ended up out of bounds (e.g. window larger than working area),
+        // park it at the top-left of the working area.
+        if (left < workingArea.Left)
+        {
+            left = workingArea.Left;
+        }
+        if (top < workingArea.Top)
+        {
+            top = workingArea.Top;
+        }
+
+        Location = new DrawingPoint(left, top);
+    }
+
+    private readonly record struct SizingLockParameters(
+        double MasterAspect,
+        bool IsHorizontal,
+        int FixedWindowWidth,
+        int FixedWindowHeight,
+        int VideoPaddingHorizontal,
+        int VideoPaddingVertical,
+        int TrackTitleHeight,
+        int BetweenGap,
+        int SidebarWidth,
+        int HostMarginsHorizontal,
+        int HostMarginsVertical);
+
+    private bool TryGetSizingAspectLockParameters(out SizingLockParameters parameters)
+    {
+        parameters = default;
+
+        if (!TryGetMasterAspectRatio(out double masterAspect))
+        {
+            return false;
+        }
+
+        if (masterAspect <= 0.01d)
+        {
+            return false;
+        }
+
+        bool horizontal = layoutComboBox.SelectedIndex == 0;
+        int nonClientWidth = Math.Max(0, Size.Width - ClientSize.Width);
+        int nonClientHeight = Math.Max(0, Size.Height - ClientSize.Height);
+
+        int sidebarWidth = _isCommentsSidebarCollapsed ? 0 : 320;
+        int videoPaddingHorizontal = videosTableLayout.Padding.Horizontal;
+        int videoPaddingVertical = videosTableLayout.Padding.Vertical;
+        int hostMarginsHorizontal = leftHostPanel.Margin.Horizontal + rightHostPanel.Margin.Horizontal;
+        int hostMarginsVertical = leftHostPanel.Margin.Vertical + rightHostPanel.Margin.Vertical;
+        int trackTitleHeight = Math.Max(0, leftTitleLabel.Height);
+        int betweenGap = BetweenPreviewGap;
+
+        int fixedWindowWidth = nonClientWidth + sidebarWidth + videoPaddingHorizontal + hostMarginsHorizontal;
+        int fixedWindowHeight = nonClientHeight + Math.Max(0, topBarPanel.Height) + Math.Max(0, bottomTransportPanel.Height) + videoPaddingVertical + hostMarginsVertical;
+
+        parameters = new SizingLockParameters(
+            MasterAspect: masterAspect,
+            IsHorizontal: horizontal,
+            FixedWindowWidth: fixedWindowWidth,
+            FixedWindowHeight: fixedWindowHeight,
+            VideoPaddingHorizontal: videoPaddingHorizontal,
+            VideoPaddingVertical: videoPaddingVertical,
+            TrackTitleHeight: trackTitleHeight,
+            BetweenGap: betweenGap,
+            SidebarWidth: sidebarWidth,
+            HostMarginsHorizontal: hostMarginsHorizontal,
+            HostMarginsVertical: hostMarginsVertical);
+        return true;
+    }
+
+    private bool TryGetMasterAspectRatio(out double masterAspect)
+    {
+        masterAspect = 0d;
+
+        int leftW = GetTrackBaseFrameWidth(_leftTrack);
+        int leftH = GetTrackBaseFrameHeight(_leftTrack);
+        int rightW = GetTrackBaseFrameWidth(_rightTrack);
+        int rightH = GetTrackBaseFrameHeight(_rightTrack);
+
+        if (leftW <= 0 || leftH <= 0)
+        {
+            if (rightW > 0 && rightH > 0)
+            {
+                masterAspect = rightW / (double)rightH;
+                return true;
+            }
+
+            return false;
+        }
+
+        if (rightW <= 0 || rightH <= 0)
+        {
+            masterAspect = leftW / (double)leftH;
+            return true;
+        }
+
+        double leftAspect = leftW / (double)leftH;
+        double rightAspect = rightW / (double)rightH;
+
+        // If they're basically the same, use their shared aspect.
+        const double aspectTolerance = 0.01d; // 1%
+        if (Math.Abs(leftAspect - rightAspect) / Math.Max(leftAspect, rightAspect) <= aspectTolerance)
+        {
+            masterAspect = (leftAspect + rightAspect) * 0.5d;
+            return true;
+        }
+
+        // Otherwise: master is the larger video (pixel area).
+        long leftArea = (long)leftW * leftH;
+        long rightArea = (long)rightW * rightH;
+        masterAspect = (leftArea >= rightArea) ? leftAspect : rightAspect;
+        return true;
+    }
+
+    private void ApplySizingAspectLock(
+        int edge,
+        IntPtr lParam,
+        SizingLockParameters parameters)
+    {
+        if (lParam == IntPtr.Zero || parameters.MasterAspect <= 0.01d)
+        {
+            return;
+        }
+
+        RECT rect = Marshal.PtrToStructure<RECT>(lParam);
+        int width = Math.Max(1, rect.Right - rect.Left);
+        int height = Math.Max(1, rect.Bottom - rect.Top);
+
+        int adjustedWidth = width;
+        int adjustedHeight = height;
+
+        bool horizontalEdge = edge is WmszLeft or WmszRight;
+        bool verticalEdge = edge is WmszTop or WmszBottom;
+
+        // We want the *image panel* (not the whole window) to preserve the master aspect.
+        // Because the top/bottom chrome and track title rows are fixed pixel sizes, the
+        // relationship between window width and height is affine rather than a constant ratio.
+        if (parameters.IsHorizontal)
+        {
+            // Side-by-side:
+            // imagePanelHeight = windowHeight - FixedWindowHeight - TrackTitleHeight
+            // imagePanelWidthPerSide = (windowWidth - FixedWindowWidth - BetweenGap) / 2
+            // Enforce: imagePanelWidthPerSide = imagePanelHeight * MasterAspect
+            int imagePanelHeight = Math.Max(1, height - parameters.FixedWindowHeight - parameters.TrackTitleHeight);
+            int desiredImagePanelWidth = Math.Max(1, (int)Math.Round(imagePanelHeight * parameters.MasterAspect));
+            int desiredWindowWidth = Math.Max(1, (desiredImagePanelWidth * 2) + parameters.BetweenGap + parameters.FixedWindowWidth);
+
+            int desiredWindowHeight = Math.Max(1, (int)Math.Round((desiredImagePanelWidth / parameters.MasterAspect) + parameters.TrackTitleHeight + parameters.FixedWindowHeight));
+
+            if (horizontalEdge)
+            {
+                adjustedWidth = desiredWindowWidth;
+                adjustedHeight = desiredWindowHeight;
+            }
+            else if (verticalEdge)
+            {
+                adjustedWidth = desiredWindowWidth;
+                adjustedHeight = desiredWindowHeight;
+            }
+            else
+            {
+                // Corner drag: pick whichever is closer.
+                int dW = Math.Abs(width - desiredWindowWidth);
+                int dH = Math.Abs(height - desiredWindowHeight);
+                if (dW <= dH)
+                {
+                    // Honor width and derive height from it.
+                    int imagePanelWidthPerSide = Math.Max(1, (int)Math.Round((width - parameters.FixedWindowWidth - parameters.BetweenGap) / 2d));
+                    adjustedWidth = (imagePanelWidthPerSide * 2) + parameters.BetweenGap + parameters.FixedWindowWidth;
+                    adjustedHeight = Math.Max(1, (int)Math.Round((imagePanelWidthPerSide / parameters.MasterAspect) + parameters.TrackTitleHeight + parameters.FixedWindowHeight));
+                }
+                else
+                {
+                    // Honor height and derive width from it.
+                    int imagePanelHeightFromHeight = Math.Max(1, height - parameters.FixedWindowHeight - parameters.TrackTitleHeight);
+                    adjustedHeight = Math.Max(1, (int)Math.Round((imagePanelHeightFromHeight / 1d) + parameters.TrackTitleHeight + parameters.FixedWindowHeight));
+                    int derivedImagePanelWidth = Math.Max(1, (int)Math.Round(imagePanelHeightFromHeight * parameters.MasterAspect));
+                    adjustedWidth = (derivedImagePanelWidth * 2) + parameters.BetweenGap + parameters.FixedWindowWidth;
+                }
+            }
+        }
+        else
+        {
+            // Stacked:
+            // imagePanelWidth = windowWidth - FixedWindowWidth
+            // imagePanelHeightPerSide = (windowHeight - FixedWindowHeight - (TrackTitleHeight * 2) - BetweenGap) / 2
+            // Enforce: imagePanelWidth = imagePanelHeightPerSide * MasterAspect
+            int imagePanelWidth = Math.Max(1, width - parameters.FixedWindowWidth);
+            int desiredImagePanelHeight = Math.Max(1, (int)Math.Round(imagePanelWidth / parameters.MasterAspect));
+            int desiredWindowHeight = Math.Max(1, (desiredImagePanelHeight * 2) + parameters.BetweenGap + (parameters.TrackTitleHeight * 2) + parameters.FixedWindowHeight);
+
+            int desiredWindowWidth = Math.Max(1, (int)Math.Round((desiredImagePanelHeight * parameters.MasterAspect) + parameters.FixedWindowWidth));
+
+            if (horizontalEdge)
+            {
+                adjustedWidth = desiredWindowWidth;
+                adjustedHeight = desiredWindowHeight;
+            }
+            else if (verticalEdge)
+            {
+                adjustedWidth = desiredWindowWidth;
+                adjustedHeight = desiredWindowHeight;
+            }
+            else
+            {
+                int dW = Math.Abs(width - desiredWindowWidth);
+                int dH = Math.Abs(height - desiredWindowHeight);
+                if (dW <= dH)
+                {
+                    // Honor width and derive height from it.
+                    int imagePanelWidthFromWidth = Math.Max(1, width - parameters.FixedWindowWidth);
+                    adjustedWidth = Math.Max(1, imagePanelWidthFromWidth + parameters.FixedWindowWidth);
+                    int imagePanelHeightPerSide = Math.Max(1, (int)Math.Round(imagePanelWidthFromWidth / parameters.MasterAspect));
+                    adjustedHeight = (imagePanelHeightPerSide * 2) + parameters.BetweenGap + (parameters.TrackTitleHeight * 2) + parameters.FixedWindowHeight;
+                }
+                else
+                {
+                    // Honor height and derive width from it.
+                    int imagePanelHeightFromHeight = Math.Max(1, (int)Math.Round((height - parameters.FixedWindowHeight - (parameters.TrackTitleHeight * 2) - parameters.BetweenGap) / 2d));
+                    adjustedHeight = (imagePanelHeightFromHeight * 2) + parameters.BetweenGap + (parameters.TrackTitleHeight * 2) + parameters.FixedWindowHeight;
+                    int derivedImagePanelWidth = Math.Max(1, (int)Math.Round(imagePanelHeightFromHeight * parameters.MasterAspect));
+                    adjustedWidth = derivedImagePanelWidth + parameters.FixedWindowWidth;
+                }
+            }
+        }
+
+        int minWidth = Math.Max(1, MinimumSize.Width);
+        int minHeight = Math.Max(1, MinimumSize.Height);
+        if (adjustedWidth < minWidth)
+        {
+            adjustedWidth = minWidth;
+        }
+        if (adjustedHeight < minHeight)
+        {
+            adjustedHeight = minHeight;
+        }
+
+        switch (edge)
+        {
+            case WmszLeft:
+                rect.Left = rect.Right - adjustedWidth;
+                rect.Bottom = rect.Top + adjustedHeight;
+                break;
+            case WmszRight:
+                rect.Right = rect.Left + adjustedWidth;
+                rect.Bottom = rect.Top + adjustedHeight;
+                break;
+            case WmszTop:
+                rect.Top = rect.Bottom - adjustedHeight;
+                rect.Right = rect.Left + adjustedWidth;
+                break;
+            case WmszTopLeft:
+                rect.Left = rect.Right - adjustedWidth;
+                rect.Top = rect.Bottom - adjustedHeight;
+                break;
+            case WmszTopRight:
+                rect.Right = rect.Left + adjustedWidth;
+                rect.Top = rect.Bottom - adjustedHeight;
+                break;
+            case WmszBottom:
+                rect.Bottom = rect.Top + adjustedHeight;
+                rect.Right = rect.Left + adjustedWidth;
+                break;
+            case WmszBottomLeft:
+                rect.Left = rect.Right - adjustedWidth;
+                rect.Bottom = rect.Top + adjustedHeight;
+                break;
+            case WmszBottomRight:
+                rect.Right = rect.Left + adjustedWidth;
+                rect.Bottom = rect.Top + adjustedHeight;
+                break;
+        }
+
+        Marshal.StructureToPtr(rect, lParam, fDeleteOld: false);
+
+        MaybeLogAspectLock(parameters, width, height, adjustedWidth, adjustedHeight);
+    }
+
+    private void MaybeLogAspectLock(
+        SizingLockParameters parameters,
+        int requestedWidth,
+        int requestedHeight,
+        int adjustedWidth,
+        int adjustedHeight)
+    {
+        DateTime nowUtc = DateTime.UtcNow;
+        if ((nowUtc - _lastAspectLockLogTimeUtc).TotalMilliseconds < 350)
+        {
+            return;
+        }
+
+        _lastAspectLockLogTimeUtc = nowUtc;
+        string status =
+            $"Lock {(parameters.IsHorizontal ? "H" : "V")} master={parameters.MasterAspect:0.0000} " +
+            $"req={requestedWidth}x{requestedHeight} adj={adjustedWidth}x{adjustedHeight} " +
+            $"fixed={parameters.FixedWindowWidth}x{parameters.FixedWindowHeight} titleH={parameters.TrackTitleHeight} gap={parameters.BetweenGap}";
+        _lastAspectLockStatus = status;
+        AppLog.Write(status);
+        BeginInvoke(new Action(() => UpdateAspectLockStatus(forceUpdateTitle: false)));
+    }
+
+    private void UpdateAspectLockStatus(bool forceUpdateTitle)
+    {
+        string baseTitle = $"Video Frame Comparer - {Path.GetFileNameWithoutExtension(_projectFilePath)}";
+        string suffix = string.Empty;
+
+        if (TryGetMasterAspectRatio(out double masterAspect))
+        {
+            int leftW = GetTrackBaseFrameWidth(_leftTrack);
+            int leftH = GetTrackBaseFrameHeight(_leftTrack);
+            int rightW = GetTrackBaseFrameWidth(_rightTrack);
+            int rightH = GetTrackBaseFrameHeight(_rightTrack);
+
+            string master = "n/a";
+            if (leftW > 0 && leftH > 0 && rightW > 0 && rightH > 0)
+            {
+                long leftArea = (long)leftW * leftH;
+                long rightArea = (long)rightW * rightH;
+                master = leftArea >= rightArea ? "A" : "B";
+            }
+            else if (leftW > 0 && leftH > 0)
+            {
+                master = "A";
+            }
+            else if (rightW > 0 && rightH > 0)
+            {
+                master = "B";
+            }
+
+            suffix = $" [lock {masterAspect:0.0000} master={master}]";
+        }
+
+        if (!string.IsNullOrWhiteSpace(_lastAspectLockStatus))
+        {
+            // Keep it short in the title bar.
+            suffix += " [sizing]";
+        }
+
+        string nextTitle = baseTitle + suffix;
+        if (forceUpdateTitle || !string.Equals(Text, nextTitle, StringComparison.Ordinal))
+        {
+            Text = nextTitle;
+        }
+    }
+
+    private bool TryGetBasePreviewLayoutSize(
+        out int basePreviewWidth,
+        out int basePreviewHeight,
+        out int extraClientWidth,
+        out int extraClientHeight)
+    {
+        int maxVideoWidth = Math.Max(
+            GetTrackBaseFrameWidth(_leftTrack),
+            GetTrackBaseFrameWidth(_rightTrack));
+        int maxVideoHeight = Math.Max(
+            GetTrackBaseFrameHeight(_leftTrack),
+            GetTrackBaseFrameHeight(_rightTrack));
+
+        if (maxVideoWidth <= 0 || maxVideoHeight <= 0)
+        {
+            basePreviewWidth = 0;
+            basePreviewHeight = 0;
+            extraClientWidth = 0;
+            extraClientHeight = 0;
+            return false;
+        }
+
+        bool horizontal = layoutComboBox.SelectedIndex == 0;
+        basePreviewWidth = horizontal ? (maxVideoWidth * 2) + BetweenPreviewGap : maxVideoWidth;
+        basePreviewHeight = horizontal
+            ? maxVideoHeight + PreviewTitleHeight
+            : (maxVideoHeight * 2) + BetweenPreviewGap + (PreviewTitleHeight * 2);
+        extraClientWidth = videosTableLayout.Padding.Horizontal + (_isCommentsSidebarCollapsed ? 0 : 320);
+        // Use actual docked panel heights instead of constants to keep the aspect lock accurate
+        // even if the UI ends up taller due to font/DPI/layout changes.
+        extraClientHeight = Math.Max(0, topBarPanel.Height) + Math.Max(0, bottomTransportPanel.Height);
+        return true;
+    }
+
+    private static int GetTrackBaseFrameWidth(VideoTrack track) =>
+        (track.IsLoaded || track.IsTemporaryWindowSource) ? Math.Max(0, track.DisplayFrameSize.Width) : 0;
+
+    private static int GetTrackBaseFrameHeight(VideoTrack track) =>
+        (track.IsLoaded || track.IsTemporaryWindowSource) ? Math.Max(0, track.DisplayFrameSize.Height) : 0;
 
 
     private static string FormatTrackFrame(VideoTrack track)
@@ -2900,10 +3661,28 @@ public partial class Form1 : Form
 internal static class AppLog
 {
     private static readonly object Sync = new();
-    private static readonly string LogFilePath = Path.Combine(AppContext.BaseDirectory, "VideoFrameComparer.log");
+    private static readonly string[] LogFilePaths =
+    [
+        Path.Combine(AppContext.BaseDirectory, "FrameComp.log"),
+        Path.Combine(AppContext.BaseDirectory, "VideoFrameComparer.log")
+    ];
 
     public static void Write(string message)
     {
+        try
+        {
+            string line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} INFO {message}{Environment.NewLine}";
+            lock (Sync)
+            {
+                foreach (string path in LogFilePaths)
+                {
+                    File.AppendAllText(path, line);
+                }
+            }
+        }
+        catch
+        {
+        }
     }
 
     public static void WriteError(string message, Exception? exception = null)
@@ -2915,7 +3694,10 @@ internal static class AppLog
                 : $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} ERROR {message} | {exception.GetType().Name}: {exception.Message}{Environment.NewLine}";
             lock (Sync)
             {
-                File.AppendAllText(LogFilePath, line);
+                foreach (string path in LogFilePaths)
+                {
+                    File.AppendAllText(path, line);
+                }
             }
         }
         catch

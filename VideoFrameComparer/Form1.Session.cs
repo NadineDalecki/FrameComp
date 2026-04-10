@@ -4,6 +4,8 @@ namespace VideoFrameComparer;
 
 public partial class Form1
 {
+    private static readonly JsonSerializerOptions SessionJsonOptions = new() { WriteIndented = true };
+
     private void RestoreSession()
     {
         try
@@ -190,7 +192,7 @@ public partial class Form1
                 LayoutIndex: layoutComboBox.SelectedIndex,
                 SpeedIndex: speedComboBox.SelectedIndex,
                 ActiveTrack: _activeTrack == _rightTrack ? "right" : "left");
-            File.WriteAllText(_projectFilePath, JsonSerializer.Serialize(session, new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(_projectFilePath, JsonSerializer.Serialize(session, SessionJsonOptions));
         }
         catch
         {

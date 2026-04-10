@@ -5,6 +5,11 @@ Windows app for frame-accurate comparison of two videos (or one video + one live
 ## Features
 
 - Side-by-side or stacked comparison layout
+- Top-bar icon actions:
+  - use app window / back to video
+  - overlay mode
+  - save screenshot
+  - export combined video
 - Shared bottom timeline with:
   - playhead dragging
   - clip bar dragging (with marker snap)
@@ -19,8 +24,8 @@ Windows app for frame-accurate comparison of two videos (or one video + one live
   - add comment at current timeline (`C`)
   - click comment to jump
   - inline delete icon per comment
-- Live app window capture per side (`Use App Window` / `Back To Video`)
-- Alignment mode for visual overlay checks (shown when live window mode is active)
+- Live app window capture per side
+- Alignment mode for visual overlay checks (available when both sides have content)
 - Built-in help:
   - top-right `?` button
   - `F1` shortcut
@@ -71,33 +76,43 @@ Comparison projects are stored as JSON files in the local `Projects` folder besi
 - On fresh startup with no comments, the comments sidebar starts collapsed.
 - App startup speed defaults to `100%`.
 - Status line format is `Paused/Playing <speed>% speed | ...`.
+- Combined video export default filename:
+  - `side-by-side_<videoA>_<videoB>_<YYYY-MM-DD>.mp4` or `stacked_<videoA>_<videoB>_<YYYY-MM-DD>.mp4`
+- Screenshot default filename:
+  - `side-by-side_<videoA>_<videoB>_<YYYY-MM-DD>.png` or `stacked_<videoA>_<videoB>_<YYYY-MM-DD>.png`
 
 ## Run From Source
 
 ```powershell
-cd D:\Programming\FrameComp
-$env:DOTNET_CLI_HOME='D:\Programming\FrameComp\.dotnet-home'
-$env:NUGET_PACKAGES='D:\Programming\FrameComp\.nuget\packages'
+cd C:\path\to\FrameComp
+$env:DOTNET_CLI_HOME='C:\path\to\FrameComp\.dotnet-home'
+$env:NUGET_PACKAGES='C:\path\to\FrameComp\.nuget\packages'
 dotnet run --project .\VideoFrameComparer\VideoFrameComparer.csproj
 ```
 
 ## Publish Locally
 
 ```powershell
-cd D:\Programming\FrameComp
+cd C:\path\to\FrameComp
 .\publish.ps1
 ```
 
 That creates the runnable app in:
 
-- `D:\Programming\FrameComp\publish\win-x64`
-- and copies the same runtime files to `D:\Programming\FrameComp`
+- `C:\path\to\FrameComp\publish\win-x64`
+- `C:\path\to\FrameComp\dist\FrameComp`
+
+If you also want a launchable copy in the repo root, run:
+
+```powershell
+.\publish.ps1 -CopyRuntimeToRepoRoot
+```
 
 ## Create A Release Zip
 
 ```powershell
-cd D:\Programming\FrameComp
+cd C:\path\to\FrameComp
 .\package-release.ps1
 ```
 
-That creates a release archive in `D:\Programming\FrameComp\release`.
+That creates a release archive in `C:\path\to\FrameComp\release`.

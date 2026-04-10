@@ -1,11 +1,187 @@
 using OpenCvSharp;
+using OpenCvSharp.Extensions;
 using System.Diagnostics;
+using System.Drawing.Imaging;
 using System.Globalization;
 
 namespace VideoFrameComparer;
 
 public partial class Form1
 {
+    private void SaveScreenshotButton_Click(object? sender, EventArgs e)
+    {
+        StopPlayback();
+        int globalFrame = Math.Clamp(masterTimeline.Value, 0, Math.Max(0, masterTimeline.Maximum));
+
+        using Bitmap? leftCapture = TryCaptureTrackSourceBitmap(_leftTrack, globalFrame);
+        using Bitmap? rightCapture = TryCaptureTrackSourceBitmap(_rightTrack, globalFrame);
+        if (leftCapture is null && rightCapture is null)
+        {
+            MessageBox.Show(this, "Nothing visible to capture yet.", "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        using Bitmap normalizedLeft = leftCapture is not null
+            ? new Bitmap(leftCapture)
+            : CreateSolidBitmap(rightCapture!.Width, rightCapture.Height, Color.Black);
+        using Bitmap normalizedRight = rightCapture is not null
+            ? new Bitmap(rightCapture)
+            : CreateSolidBitmap(leftCapture!.Width, leftCapture.Height, Color.Black);
+
+        using Bitmap screenshot = ComposeScreenshotBitmap(normalizedLeft, normalizedRight);
+
+        string layoutName = layoutComboBox.SelectedIndex == 0 ? "side-by-side" : "stacked";
+        string defaultName = $"{layoutName}_{GetExportTrackName(_leftTrack)}_{GetExportTrackName(_rightTrack)}_{DateTime.Now:yyyy-MM-dd}.png";
+        using var saveDialog = new SaveFileDialog
+        {
+            Title = "Save Screenshot",
+            Filter = "PNG Image (*.png)|*.png",
+            FileName = defaultName,
+            AddExtension = true,
+            DefaultExt = "png",
+            OverwritePrompt = true
+        };
+
+        if (saveDialog.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(saveDialog.FileName))
+        {
+            return;
+        }
+
+        try
+        {
+            screenshot.Save(saveDialog.FileName, ImageFormat.Png);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Screenshot save failed:\n{ex.Message}", "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private Bitmap? TryCaptureTrackSourceBitmap(VideoTrack track, int globalFrame)
+    {
+        if (!track.IsLoaded)
+        {
+            return null;
+        }
+
+        if (track.IsTemporaryWindowSource)
+        {
+            return track.PictureBox.Image is Bitmap liveBitmap && liveBitmap.Width > 0 && liveBitmap.Height > 0
+                ? new Bitmap(liveBitmap)
+                : null;
+        }
+
+        int width = Math.Max(1, track.FrameSize.Width);
+        int height = Math.Max(1, track.FrameSize.Height);
+        int localFrame = globalFrame - track.TimelineStartFrame;
+        if (localFrame < 0 || localFrame > track.LastFrameIndex)
+        {
+            return CreateSolidBitmap(width, height, Color.Black);
+        }
+
+        using Mat? frame = track.ReadFrame(localFrame);
+        if (frame is null || frame.Empty())
+        {
+            return CreateSolidBitmap(width, height, Color.Black);
+        }
+
+        return BitmapConverter.ToBitmap(frame);
+    }
+
+    private Bitmap ComposeScreenshotBitmap(Bitmap leftCapture, Bitmap rightCapture)
+    {
+        bool sideBySide = layoutComboBox.SelectedIndex == 0;
+        int width = sideBySide
+            ? leftCapture.Width + rightCapture.Width
+            : Math.Max(leftCapture.Width, rightCapture.Width);
+        int height = sideBySide
+            ? Math.Max(leftCapture.Height, rightCapture.Height)
+            : leftCapture.Height + rightCapture.Height;
+
+        var result = new Bitmap(Math.Max(1, width), Math.Max(1, height));
+        using Graphics g = Graphics.FromImage(result);
+        g.Clear(Color.Black);
+        if (sideBySide)
+        {
+            int leftY = (height - leftCapture.Height) / 2;
+            int rightY = (height - rightCapture.Height) / 2;
+            g.DrawImage(leftCapture, 0, leftY, leftCapture.Width, leftCapture.Height);
+            g.DrawImage(rightCapture, leftCapture.Width, rightY, rightCapture.Width, rightCapture.Height);
+        }
+        else
+        {
+            int leftX = (width - leftCapture.Width) / 2;
+            int rightX = (width - rightCapture.Width) / 2;
+            g.DrawImage(leftCapture, leftX, 0, leftCapture.Width, leftCapture.Height);
+            g.DrawImage(rightCapture, rightX, leftCapture.Height, rightCapture.Width, rightCapture.Height);
+        }
+
+        return result;
+    }
+
+    private static Bitmap CreateSolidBitmap(int width, int height, Color color)
+    {
+        var bitmap = new Bitmap(Math.Max(1, width), Math.Max(1, height));
+        using Graphics g = Graphics.FromImage(bitmap);
+        g.Clear(color);
+        return bitmap;
+    }
+
+    private static string GetExportTrackName(VideoTrack track)
+    {
+        string rawName;
+        if (!string.IsNullOrWhiteSpace(track.FilePath))
+        {
+            rawName = Path.GetFileNameWithoutExtension(track.FilePath);
+        }
+        else if (track.IsTemporaryWindowSource)
+        {
+            rawName = string.IsNullOrWhiteSpace(track.TemporaryWindowTitle) ? track.Name : track.TemporaryWindowTitle;
+        }
+        else
+        {
+            rawName = track.Name;
+        }
+
+        return SanitizeFileNameSegment(rawName);
+    }
+
+    private static string SanitizeFileNameSegment(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "video";
+        }
+
+        char[] invalid = Path.GetInvalidFileNameChars();
+        var sb = new System.Text.StringBuilder(value.Length);
+        foreach (char c in value.Trim())
+        {
+            if (invalid.Contains(c))
+            {
+                continue;
+            }
+
+            if (char.IsLetterOrDigit(c) || c is '-' or '_')
+            {
+                sb.Append(char.ToLowerInvariant(c));
+            }
+            else if (char.IsWhiteSpace(c) || c is '.' or '+' or '(' or ')' or '[' or ']')
+            {
+                sb.Append('-');
+            }
+        }
+
+        string collapsed = sb.ToString();
+        while (collapsed.Contains("--", StringComparison.Ordinal))
+        {
+            collapsed = collapsed.Replace("--", "-", StringComparison.Ordinal);
+        }
+
+        collapsed = collapsed.Trim('-');
+        return string.IsNullOrWhiteSpace(collapsed) ? "video" : collapsed;
+    }
+
     private void BeginExportOperation(int jobCount, string preparingStatus, out int restoreGlobalFrame, out TrimExportProgressForm progressForm)
     {
         StopPlayback();
@@ -349,7 +525,7 @@ public partial class Form1
         string layoutName = layoutComboBox.SelectedIndex == 0 ? "side-by-side" : "stacked";
         int trimIn = GetGlobalTrimIn();
         int trimOut = GetGlobalTrimOut();
-        saveDialog.FileName = $"{Path.GetFileNameWithoutExtension(_projectFilePath)}_combined_{layoutName}_{trimIn + 1}-{trimOut + 1}.mp4";
+        saveDialog.FileName = $"{layoutName}_{GetExportTrackName(_leftTrack)}_{GetExportTrackName(_rightTrack)}_{DateTime.Now:yyyy-MM-dd}.mp4";
 
         if (saveDialog.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(saveDialog.FileName))
         {
@@ -954,15 +1130,18 @@ public partial class Form1
 
     private void UpdateTrimActionButtonsState()
     {
-        bool canExport = CanExportTrimRange();
         bool canExportCombined = CanExportCombinedRange();
-        if (_saveTrimmedVideosTopBarButton is not null)
-        {
-            _saveTrimmedVideosTopBarButton.Enabled = canExport;
-        }
         if (_saveCombinedVideoTopBarButton is not null)
         {
             _saveCombinedVideoTopBarButton.Enabled = canExportCombined;
+            if (!canExportCombined)
+            {
+                _uiToolTip.SetToolTip(_saveCombinedVideoTopBarButton, "Export disabled: set a trim range (I/O) that overlaps at least one clip.");
+            }
+            else
+            {
+                _uiToolTip.SetToolTip(_saveCombinedVideoTopBarButton, "Export one combined video in current layout (side-by-side or stacked)");
+            }
         }
     }
 

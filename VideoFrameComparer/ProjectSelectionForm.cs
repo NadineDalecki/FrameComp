@@ -11,8 +11,9 @@ internal sealed class ProjectSelectionForm : Form
     private static readonly Color PrimaryButtonForeground = Color.White;
     private static readonly Color SecondaryButtonBackground = Color.FromArgb(62, 62, 62);
     private static readonly Color SecondaryButtonForeground = Color.White;
+    private static readonly JsonSerializerOptions PrettyJsonOptions = new() { WriteIndented = true };
 
-    private static readonly string ProjectDirectoryPath = Path.Combine(AppContext.BaseDirectory, "Projects");
+    private static readonly string ProjectDirectoryPath = ResolveProjectDirectoryPath();
     private static readonly string LastProjectPathFile = Path.Combine(ProjectDirectoryPath, "last-project.txt");
 
     private readonly ListBox _projectListBox;
@@ -36,10 +37,10 @@ internal sealed class ProjectSelectionForm : Form
         _infoLabel = new Label
         {
             Dock = DockStyle.Top,
-            Height = 48,
+            Height = 66,
             Padding = new Padding(16, 14, 16, 0),
             ForeColor = Color.Gainsboro,
-            Text = "Choose an existing comparison project or create a new one. Projects are stored in the Projects folder beside the app."
+            Text = "Choose an existing comparison project or create a new one. Projects are stored in the Projects folder."
         };
 
         _projectListBox = new ListBox
@@ -131,10 +132,17 @@ internal sealed class ProjectSelectionForm : Form
         Directory.CreateDirectory(ProjectDirectoryPath);
         _projectListBox.Items.Clear();
 
-        foreach (string projectPath in Directory.GetFiles(ProjectDirectoryPath, "*.json").OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+        string[] projectFiles = Directory.GetFiles(ProjectDirectoryPath, "*.json");
+        foreach (string projectPath in projectFiles.OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
         {
             _projectListBox.Items.Add(new ProjectListItem(projectPath));
         }
+
+        _infoLabel.Text =
+            "Choose an existing comparison project or create a new one. Projects are stored in the Projects folder."
+            + Environment.NewLine
+            + $"Folder: {ProjectDirectoryPath} ({projectFiles.Length} found)";
+        AppLog.Write($"Project picker folder resolved to: {ProjectDirectoryPath} | Count={projectFiles.Length}");
 
         string? lastProjectPath = TryReadLastProjectPath();
         if (lastProjectPath is not null)
@@ -330,7 +338,7 @@ internal sealed class ProjectSelectionForm : Form
             }
 
             obj["ProjectName"] = projectName;
-            File.WriteAllText(projectPath, obj.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(projectPath, obj.ToJsonString(PrettyJsonOptions));
         }
         catch
         {
@@ -393,6 +401,91 @@ internal sealed class ProjectSelectionForm : Form
     private static string EscapeJson(string value)
     {
         return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
+    }
+
+    private static string ResolveProjectDirectoryPath()
+    {
+        string localProjectsDir = Path.Combine(AppContext.BaseDirectory, "Projects");
+        string? fallbackExistingProjects = null;
+        var startDirectories = new List<string>();
+
+        // Prefer the repository root Projects folder when running from dist\FrameComp.
+        try
+        {
+            string baseDir = Path.GetFullPath(AppContext.BaseDirectory);
+            string trimmedBaseDir = baseDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string baseName = new DirectoryInfo(trimmedBaseDir).Name;
+            string? parentName = Directory.GetParent(trimmedBaseDir)?.Name;
+            if (string.Equals(parentName, "dist", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(baseName, "FrameComp", StringComparison.OrdinalIgnoreCase))
+            {
+                string rootProjectsDir = Path.GetFullPath(Path.Combine(trimmedBaseDir, "..", "..", "Projects"));
+                if (Directory.Exists(rootProjectsDir))
+                {
+                    AppLog.Write($"Using repository root projects folder: {rootProjectsDir}");
+                    return rootProjectsDir;
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        static void AddUniqueDirectory(List<string> destinations, string? path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return;
+            }
+
+            string fullPath = Path.GetFullPath(path);
+            if (destinations.Any(existing => string.Equals(existing, fullPath, StringComparison.OrdinalIgnoreCase)))
+            {
+                return;
+            }
+
+            destinations.Add(fullPath);
+        }
+
+        AddUniqueDirectory(startDirectories, AppContext.BaseDirectory);
+        AddUniqueDirectory(startDirectories, Environment.CurrentDirectory);
+        AddUniqueDirectory(startDirectories, Application.StartupPath);
+
+        foreach (string startDirectory in startDirectories)
+        {
+            string? current = startDirectory;
+            while (!string.IsNullOrWhiteSpace(current))
+            {
+                string candidate = Path.Combine(current, "Projects");
+                if (Directory.Exists(candidate))
+                {
+                    fallbackExistingProjects ??= candidate;
+                    try
+                    {
+                        if (Directory.EnumerateFiles(candidate, "*.json").Any())
+                        {
+                            AppLog.Write($"Using projects folder with project files: {candidate}");
+                            return candidate;
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                string? parent = Directory.GetParent(current)?.FullName;
+                if (string.IsNullOrWhiteSpace(parent) || string.Equals(parent, current, StringComparison.OrdinalIgnoreCase))
+                {
+                    break;
+                }
+
+                current = parent;
+            }
+        }
+
+        string resolved = fallbackExistingProjects ?? localProjectsDir;
+        AppLog.Write($"Using fallback projects folder: {resolved}");
+        return resolved;
     }
 
     private static void StyleButton(Button button, bool isPrimary)
