@@ -47,6 +47,12 @@ The easiest way for normal users is a GitHub Release zip.
 
 No separate .NET install should be needed for the published `win-x64` build.
 
+For local/dev runs in this repository, use:
+
+- `dist\FrameComp\VideoFrameComparer.exe`
+
+Project JSON files are expected in the repository `Projects` folder.
+
 ## Controls
 
 - `Left / Right / Up / Down`: move the active video by 1 frame

@@ -27,5 +27,6 @@ wpfgfx_cor3.dll
 
 .vs/
 *.user
+*.lnk
 
 QA.md

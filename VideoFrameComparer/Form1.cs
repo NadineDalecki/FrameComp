@@ -89,8 +89,6 @@ public partial class Form1 : Form
     private bool _isUpdatingSharedCommentsList;
     private bool _isCommentsSidebarCollapsed;
     private bool _suppressAutoWindowResize;
-    private DateTime _lastAspectLockLogTimeUtc = DateTime.MinValue;
-    private string _lastAspectLockStatus = string.Empty;
     private bool _initialContentSizeApplied;
     private PictureBox? _alignmentOverlayPictureBox;
     private Panel? _clipTimelineViewport;
@@ -236,7 +234,6 @@ public partial class Form1 : Form
         InitializeTrimTopBarButtons();
         ConfigureTooltips();
         UpdateTrimActionButtonsState();
-        UpdateAspectLockStatus(forceUpdateTitle: true);
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -1340,7 +1337,7 @@ public partial class Form1 : Form
         };
         content.Controls.Add(CreateHelpSection(
             "Top Bar",
-            "Window icon: use app window / back to video\r\nOverlay icon: align both views\r\nCamera: save screenshot\r\nExport: save combined video",
+            "Layout icons: side-by-side / stacked\r\nWindow icon: use app window / back to video\r\nOverlay icon: align both views\r\nCamera: save screenshot\r\nExport: save combined video\r\nComments icon: show or hide comments sidebar",
             CreateHelpTopBarIcon()));
 
         content.Controls.Add(CreateHelpSection(
@@ -3058,75 +3055,6 @@ public partial class Form1 : Form
         }
 
         Marshal.StructureToPtr(rect, lParam, fDeleteOld: false);
-
-        MaybeLogAspectLock(parameters, width, height, adjustedWidth, adjustedHeight);
-    }
-
-    private void MaybeLogAspectLock(
-        SizingLockParameters parameters,
-        int requestedWidth,
-        int requestedHeight,
-        int adjustedWidth,
-        int adjustedHeight)
-    {
-        DateTime nowUtc = DateTime.UtcNow;
-        if ((nowUtc - _lastAspectLockLogTimeUtc).TotalMilliseconds < 350)
-        {
-            return;
-        }
-
-        _lastAspectLockLogTimeUtc = nowUtc;
-        string status =
-            $"Lock {(parameters.IsHorizontal ? "H" : "V")} master={parameters.MasterAspect:0.0000} " +
-            $"req={requestedWidth}x{requestedHeight} adj={adjustedWidth}x{adjustedHeight} " +
-            $"fixed={parameters.FixedWindowWidth}x{parameters.FixedWindowHeight} titleH={parameters.TrackTitleHeight} gap={parameters.BetweenGap}";
-        _lastAspectLockStatus = status;
-        AppLog.Write(status);
-        BeginInvoke(new Action(() => UpdateAspectLockStatus(forceUpdateTitle: false)));
-    }
-
-    private void UpdateAspectLockStatus(bool forceUpdateTitle)
-    {
-        string baseTitle = $"Video Frame Comparer - {Path.GetFileNameWithoutExtension(_projectFilePath)}";
-        string suffix = string.Empty;
-
-        if (TryGetMasterAspectRatio(out double masterAspect))
-        {
-            int leftW = GetTrackBaseFrameWidth(_leftTrack);
-            int leftH = GetTrackBaseFrameHeight(_leftTrack);
-            int rightW = GetTrackBaseFrameWidth(_rightTrack);
-            int rightH = GetTrackBaseFrameHeight(_rightTrack);
-
-            string master = "n/a";
-            if (leftW > 0 && leftH > 0 && rightW > 0 && rightH > 0)
-            {
-                long leftArea = (long)leftW * leftH;
-                long rightArea = (long)rightW * rightH;
-                master = leftArea >= rightArea ? "A" : "B";
-            }
-            else if (leftW > 0 && leftH > 0)
-            {
-                master = "A";
-            }
-            else if (rightW > 0 && rightH > 0)
-            {
-                master = "B";
-            }
-
-            suffix = $" [lock {masterAspect:0.0000} master={master}]";
-        }
-
-        if (!string.IsNullOrWhiteSpace(_lastAspectLockStatus))
-        {
-            // Keep it short in the title bar.
-            suffix += " [sizing]";
-        }
-
-        string nextTitle = baseTitle + suffix;
-        if (forceUpdateTitle || !string.Equals(Text, nextTitle, StringComparison.Ordinal))
-        {
-            Text = nextTitle;
-        }
     }
 
     private bool TryGetBasePreviewLayoutSize(

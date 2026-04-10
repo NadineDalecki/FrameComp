@@ -37,7 +37,7 @@ internal sealed class ProjectSelectionForm : Form
         _infoLabel = new Label
         {
             Dock = DockStyle.Top,
-            Height = 66,
+            Height = 48,
             Padding = new Padding(16, 14, 16, 0),
             ForeColor = Color.Gainsboro,
             Text = "Choose an existing comparison project or create a new one. Projects are stored in the Projects folder."
@@ -138,11 +138,7 @@ internal sealed class ProjectSelectionForm : Form
             _projectListBox.Items.Add(new ProjectListItem(projectPath));
         }
 
-        _infoLabel.Text =
-            "Choose an existing comparison project or create a new one. Projects are stored in the Projects folder."
-            + Environment.NewLine
-            + $"Folder: {ProjectDirectoryPath} ({projectFiles.Length} found)";
-        AppLog.Write($"Project picker folder resolved to: {ProjectDirectoryPath} | Count={projectFiles.Length}");
+        _infoLabel.Text = "Choose an existing comparison project or create a new one. Projects are stored in the Projects folder.";
 
         string? lastProjectPath = TryReadLastProjectPath();
         if (lastProjectPath is not null)
@@ -422,7 +418,6 @@ internal sealed class ProjectSelectionForm : Form
                 string rootProjectsDir = Path.GetFullPath(Path.Combine(trimmedBaseDir, "..", "..", "Projects"));
                 if (Directory.Exists(rootProjectsDir))
                 {
-                    AppLog.Write($"Using repository root projects folder: {rootProjectsDir}");
                     return rootProjectsDir;
                 }
             }
@@ -464,7 +459,6 @@ internal sealed class ProjectSelectionForm : Form
                     {
                         if (Directory.EnumerateFiles(candidate, "*.json").Any())
                         {
-                            AppLog.Write($"Using projects folder with project files: {candidate}");
                             return candidate;
                         }
                     }
@@ -483,9 +477,7 @@ internal sealed class ProjectSelectionForm : Form
             }
         }
 
-        string resolved = fallbackExistingProjects ?? localProjectsDir;
-        AppLog.Write($"Using fallback projects folder: {resolved}");
-        return resolved;
+        return fallbackExistingProjects ?? localProjectsDir;
     }
 
     private static void StyleButton(Button button, bool isPrimary)
